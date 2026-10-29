@@ -90,6 +90,9 @@ class ChaseThreat:
     chaser_ids: tuple[int, ...]
     chaser_kinds: tuple[PieceKind, ...]
     has_real_root: bool
+    target_is_pinned: bool = False
+    target_is_blocked_horse: bool = False
+    has_unimpeded_horse_chaser: bool = False
 
 
 @dataclass(frozen=True)
@@ -544,6 +547,55 @@ def _find_piece_square(board: Board, identity: int) -> Square | None:
     return None
 
 
+def _piece_is_pinned(state: XiangqiState, identity: int) -> bool:
+    origin = _find_piece_square(state.board, identity)
+    if origin is None:
+        return False
+    piece = state.board[origin[0]][origin[1]]
+    if piece is None or piece.kind is PieceKind.GENERAL:
+        return False
+
+    for destination in _piece_destinations(state.board, origin, piece):
+        captured = state.board[destination[0]][destination[1]]
+        if captured is not None and captured.kind is PieceKind.GENERAL:
+            continue
+        rows = [list(row) for row in state.board]
+        rows[origin[0]][origin[1]] = None
+        rows[destination[0]][destination[1]] = piece
+        board = tuple(tuple(row) for row in rows)
+        general = _find_general(board, piece.side)
+        if _is_square_attacked_on_board(board, general, piece.side.opponent):
+            return True
+    return False
+
+
+def _horse_has_blocked_leg(board: Board, origin: Square) -> bool:
+    row, column = origin
+    for row_step, column_step in _HORSE_STEPS:
+        destination = (row + row_step, column + column_step)
+        if not _inside(destination):
+            continue
+        if abs(row_step) == 2:
+            leg = (row + (1 if row_step > 0 else -1), column)
+        else:
+            leg = (row, column + (1 if column_step > 0 else -1))
+        if board[leg[0]][leg[1]] is not None:
+            return True
+    return False
+
+
+def _chaser_has_unblocked_horse(board: Board, chaser_ids: tuple[int, ...]) -> bool:
+    for identity in chaser_ids:
+        square = _find_piece_square(board, identity)
+        if square is None:
+            continue
+        piece = board[square[0]][square[1]]
+        if piece is not None and piece.kind is PieceKind.HORSE:
+            if not _horse_has_blocked_leg(board, square):
+                return True
+    return False
+
+
 def _collect_chase_candidates(
     state: XiangqiState,
     chaser_side: Side,
@@ -643,6 +695,15 @@ def _resolve_chase_candidates(
                     surviving_chasers[identity] for identity in sorted(surviving_chasers)
                 ),
                 has_real_root=real_root,
+                target_is_pinned=_piece_is_pinned(state, candidate.target_id),
+                target_is_blocked_horse=(
+                    target.kind is PieceKind.HORSE
+                    and _horse_has_blocked_leg(state.board, target_square)
+                ),
+                has_unimpeded_horse_chaser=_chaser_has_unblocked_horse(
+                    state.board,
+                    tuple(sorted(surviving_chasers)),
+                ),
             )
         )
     return tuple(resolved)
@@ -807,7 +868,14 @@ def _perpetual_chase_ruling(
     chaser_kinds = {kind for threat in threats for kind in threat.chaser_kinds}
     if PieceKind.GENERAL in chaser_kinds or PieceKind.PAWN in chaser_kinds:
         return GameStatus.DRAW
+    if any(
+        threat.target_is_blocked_horse and threat.has_unimpeded_horse_chaser
+        for threat in threats
+    ):
+        return GameStatus.PERPETUAL_CHASE_LOSS
     if any(threat.target_kind in threat.chaser_kinds for threat in threats):
+        if any(threat.target_is_pinned for threat in threats):
+            return GameStatus.PERPETUAL_CHASE_LOSS
         return GameStatus.DRAW
 
     # Article 20.3 penalizes multiple non-General/non-Pawn pieces chasing one target.
