@@ -385,6 +385,9 @@ def repeated_chase_state(
     chaser_kind: PieceKind = PieceKind.HORSE,
     target_kind: PieceKind = PieceKind.ROOK,
     target_is_unadvanced_pawn: bool = False,
+    target_is_pinned: bool = False,
+    target_is_blocked_horse: bool = False,
+    has_unimpeded_horse_chaser: bool = False,
 ) -> XiangqiState:
     state = make_state(
         pieces=[
@@ -403,6 +406,9 @@ def repeated_chase_state(
         chaser_ids=(chaser.identity,),
         chaser_kinds=(chaser.kind,),
         has_real_root=real_root,
+        target_is_pinned=target_is_pinned,
+        target_is_blocked_horse=target_is_blocked_horse,
+        has_unimpeded_horse_chaser=has_unimpeded_horse_chaser,
     )
     records = (
         MoveRecord(Side.RED, Move((4, 4), (3, 2)), chaser.identity, False),
@@ -454,6 +460,27 @@ def test_perpetual_same_type_chase_draws() -> None:
     )
 
     assert game_status(state) is GameStatus.DRAW
+
+
+def test_same_type_chase_of_a_pinned_piece_is_a_loss() -> None:
+    state = repeated_chase_state(
+        chaser_kind=PieceKind.ROOK,
+        target_kind=PieceKind.ROOK,
+        target_is_pinned=True,
+    )
+
+    assert game_status(state) is GameStatus.PERPETUAL_CHASE_LOSS
+
+
+def test_unimpeded_horse_chasing_a_blocked_horse_is_a_loss() -> None:
+    state = repeated_chase_state(
+        chaser_kind=PieceKind.HORSE,
+        target_kind=PieceKind.HORSE,
+        target_is_blocked_horse=True,
+        has_unimpeded_horse_chaser=True,
+    )
+
+    assert game_status(state) is GameStatus.PERPETUAL_CHASE_LOSS
 
 
 def test_perpetual_pawn_chase_is_not_a_loss() -> None:

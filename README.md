@@ -49,9 +49,9 @@ position repetition draws. Natural movecount draws after each side has 100
 counted moves without a capture; no more than ten checking moves per side count
 toward that limit. Bare generals also draw. The six-field FEN does not contain
 the move sequence or natural-movecount metadata, so persist those state fields
-alongside FEN when saving an in-progress tournament game. Complex arbiter cases
-such as perpetual mating-threat sequences, pinned-piece chase exceptions, and
-perpetual block/offer/exchange still require explicit adjudication.
+alongside FEN when saving an in-progress tournament game. Complex mixed
+mating-threat repetitions and perpetual block/offer/exchange adjudication still
+require explicit handling.
 
 ## Register an account
 
