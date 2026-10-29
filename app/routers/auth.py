@@ -14,16 +14,23 @@ from ..email_service import (
     EmailConfigurationError,
     EmailDeliveryError,
     ensure_email_configured,
+    send_password_reset_email,
     send_verification_email,
 )
 from ..models import User
 from ..otp_store import (
     clear_email_otp,
+    clear_password_reset_otp,
+    consume_password_reset_otp,
     issue_email_otp,
+    issue_password_reset_otp,
     verify_email_otp,
 )
 from ..schemas import (
+    ForgotPasswordRequest,
+    MessageResponse,
     RegisterRequest,
+    ResetPasswordRequest,
     UserResponse,
     VerifyEmailRequest,
 )
@@ -157,11 +164,109 @@ def verify_account_email(payload: VerifyEmailRequest, session: SessionDep) -> Us
     return user
 
 
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Send a password reset code by email",
+)
+def forgot_password(
+    payload: ForgotPasswordRequest,
+    session: SessionDep,
+) -> MessageResponse:
+    """Send a reset code without revealing whether the email has an account."""
+    email = str(payload.email).strip().lower()
+    generic_message = "If an active account exists for this email, a reset code has been sent."
+
+    try:
+        ensure_email_configured()
+    except EmailConfigurationError:
+        logger.exception("Password reset email service is not configured")
+        return MessageResponse(message=generic_message)
+
+    user = session.scalar(
+        select(User).where(User.email == email, User.is_active.is_(True))
+    )
+    if user is None:
+        return MessageResponse(message=generic_message)
+
+    try:
+        otp = issue_password_reset_otp(user.id)
+    except RedisError:
+        logger.exception("Could not store password reset code in Redis")
+        return MessageResponse(message=generic_message)
+
+    try:
+        send_password_reset_email(email, otp)
+    except (EmailConfigurationError, EmailDeliveryError):
+        _clear_password_reset_otp_after_error(user.id)
+        logger.exception("Could not send password reset email")
+
+    return MessageResponse(message=generic_message)
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    summary="Reset a password using an emailed code",
+)
+def reset_password(
+    payload: ResetPasswordRequest,
+    session: SessionDep,
+) -> MessageResponse:
+    """Verify the reset code and replace the account's password hash."""
+    email = str(payload.email).strip().lower()
+    user = session.scalar(
+        select(User).where(User.email == email, User.is_active.is_(True))
+    )
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired password reset code",
+        )
+
+    try:
+        result = consume_password_reset_otp(user.id, payload.otp)
+    except RedisError as exc:
+        logger.exception("Could not verify password reset code in Redis")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Password reset service is temporarily unavailable",
+        ) from exc
+
+    if result == -2:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many incorrect password reset attempts",
+        )
+    if result != 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired password reset code",
+        )
+
+    user.password_hash = hash_password(payload.new_password)
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+    return MessageResponse(message="Password reset successfully")
+
+
 def _clear_otp_after_error(user_id: int) -> None:
     try:
         clear_email_otp(user_id)
     except RedisError:
         logger.exception("Could not clear an unsent email verification code")
+
+
+def _clear_password_reset_otp_after_error(user_id: int) -> None:
+    try:
+        clear_password_reset_otp(user_id)
+    except RedisError:
+        logger.exception("Could not clear an unsent password reset code")
 
 
 def _delete_pending_user(session: Session, user: User) -> None:

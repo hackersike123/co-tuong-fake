@@ -1,7 +1,7 @@
 # Co Tuong backend
 
-FastAPI backend written in Python. Email registration requires OTP verification
-before an account becomes active.
+FastAPI backend written in Python. Registration requires email OTP verification
+before an account becomes active. Password recovery uses a separate email OTP.
 
 ## Run locally on Windows
 
@@ -58,6 +58,34 @@ the password or its hash.
 A valid, unexpired code activates the account. Five incorrect attempts expire
 the code. Invalid or expired codes return HTTP 400; too many attempts return
 HTTP 429.
+
+## Forgot and reset a password
+
+Request a reset code with `POST /api/v1/auth/forgot-password`:
+
+```json
+{
+  "email": "player@example.com"
+}
+```
+
+The API sends a six-digit code to an active account's email. The code is stored
+in Redis for 300 seconds. The response is the same whether the email exists or
+not.
+
+Reset the password with `POST /api/v1/auth/reset-password`:
+
+```json
+{
+  "email": "player@example.com",
+  "otp": "042781",
+  "new_password": "new-secure-password",
+  "confirm_password": "new-secure-password"
+}
+```
+
+The new password and confirmation must match and be 8–128 characters. A reset
+code can be used once; five wrong codes invalidate it.
 
 ## SMTP setup
 

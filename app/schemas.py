@@ -8,6 +8,7 @@ from pydantic import (
     EmailStr,
     Field,
     field_validator,
+    model_validator,
 )
 
 
@@ -32,6 +33,33 @@ class VerifyEmailRequest(BaseModel):
 
     email: EmailStr
     otp: str = Field(pattern=r"^[0-9]{6}$", examples=["042781"])
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Email address for a password reset request."""
+
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """OTP and matching new password fields used to reset a password."""
+
+    email: EmailStr
+    otp: str = Field(pattern=r"^[0-9]{6}$", examples=["042781"])
+    new_password: str = Field(min_length=8, max_length=128, repr=False)
+    confirm_password: str = Field(min_length=8, max_length=128, repr=False)
+
+    @model_validator(mode="after")
+    def validate_password_confirmation(self) -> "ResetPasswordRequest":
+        if self.new_password != self.confirm_password:
+            raise ValueError("New password and confirmation do not match")
+        return self
+
+
+class MessageResponse(BaseModel):
+    """Generic message response for account operations."""
+
+    message: str
 
 
 class UserResponse(BaseModel):
