@@ -144,3 +144,104 @@ def test_five_wrong_codes_expire_the_otp(
         json={"email": "another-player@example.com", "otp": correct_otp},
     )
     assert correct_response.status_code == 400
+
+
+def test_forgot_password_and_one_time_reset_code(
+    api_client: tuple[TestClient, list[tuple[str, str]], fakeredis.FakeRedis, sessionmaker[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, fake_redis, test_session_factory = api_client
+    reset_emails: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        auth_routes,
+        "send_password_reset_email",
+        lambda email, otp: reset_emails.append((email, otp)),
+    )
+    old_password = "old-password-123"
+    new_password = "new-password-456"
+
+    with test_session_factory() as session:
+        user = User(
+            email="reset-player@example.com",
+            display_name="Reset Player",
+            password_hash=PasswordHash.recommended().hash(old_password),
+            is_active=True,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        user_id = user.id
+
+    unknown_response = client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "unknown-player@example.com"},
+    )
+    request_response = client.post(
+        "/api/v1/auth/forgot-password",
+        json={"email": "reset-player@example.com"},
+    )
+
+    assert unknown_response.status_code == 202
+    assert request_response.status_code == 202
+    assert unknown_response.json() == request_response.json()
+    assert len(reset_emails) == 1
+    sent_email, otp = reset_emails[0]
+    assert sent_email == "reset-player@example.com"
+    assert len(otp) == 6 and otp.isdigit()
+
+    otp_key = otp_store._password_reset_otp_key(user_id)
+    assert fake_redis.get(otp_key) == otp
+    assert 1 <= fake_redis.ttl(otp_key) <= otp_store.OTP_TTL_SECONDS
+
+    mismatch_response = client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "email": sent_email,
+            "otp": otp,
+            "new_password": new_password,
+            "confirm_password": "different-password-789",
+        },
+    )
+    assert mismatch_response.status_code == 422
+
+    wrong_otp = "999999" if otp != "999999" else "888888"
+    wrong_code_response = client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "email": sent_email,
+            "otp": wrong_otp,
+            "new_password": new_password,
+            "confirm_password": new_password,
+        },
+    )
+    assert wrong_code_response.status_code == 400
+
+    reset_response = client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "email": sent_email,
+            "otp": otp,
+            "new_password": new_password,
+            "confirm_password": new_password,
+        },
+    )
+    assert reset_response.status_code == 200
+    assert fake_redis.exists(otp_key) == 0
+
+    replay_response = client.post(
+        "/api/v1/auth/reset-password",
+        json={
+            "email": sent_email,
+            "otp": otp,
+            "new_password": "another-password-789",
+            "confirm_password": "another-password-789",
+        },
+    )
+    assert replay_response.status_code == 400
+
+    with test_session_factory() as session:
+        user = session.scalar(select(User).where(User.email == sent_email))
+        assert user is not None
+        assert user.is_active is True
+        assert PasswordHash.recommended().verify(new_password, user.password_hash)
+        assert not PasswordHash.recommended().verify(old_password, user.password_hash)
