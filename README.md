@@ -53,6 +53,29 @@ alongside FEN when saving an in-progress tournament game. Complex mixed
 mating-threat repetitions and perpetual block/offer/exchange adjudication still
 require explicit handling.
 
+## Play against the computer
+
+The backend exposes a stateless PvE API at `/api/v1/pve`. Fetch
+`GET /api/v1/pve/options` for the starting FEN, side choices (`w` for Red and
+`b` for Black), and allowed depths. Start a game with `POST /api/v1/pve/games`:
+
+```json
+{
+  "player_side": "w",
+  "difficulty": "medium",
+  "depth": 3
+}
+```
+
+Difficulty depth ranges are Easy 1–2, Medium 3–4, and Hard 5. Easy sometimes
+chooses a random legal move. Medium evaluates material and piece development;
+Hard also evaluates central control and check pressure. The server returns the
+starting FEN and selected sides. The client keeps the current FEN and requests
+the AI turn with `POST /api/v1/pve/ai-move`, sending `fen`, `player_side`,
+`difficulty`, and optional `depth`. The response includes the AI move and the
+updated FEN. The endpoint returns HTTP 409 when it is the player's turn or the
+game has ended.
+
 ## Login and remembered sessions
 
 Set `JWT_SECRET` in `.env` to a random value containing at least 32 characters.
