@@ -1,0 +1,1 @@
+"""Co Tuong backend application."""
