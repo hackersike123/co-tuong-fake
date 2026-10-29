@@ -17,6 +17,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./co_tuong.db")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "http://localhost:5173").rstrip("/")
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
