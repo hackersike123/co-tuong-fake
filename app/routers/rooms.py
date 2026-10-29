@@ -3,16 +3,25 @@
 import logging
 import secrets
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect, status
 from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
 
+from ..email_service import (
+    EmailConfigurationError,
+    EmailDeliveryError,
+    send_room_invitation_email,
+)
 from ..room_hub import room_hub
 from ..room_schemas import (
     RoomAccessResponse,
     RoomActionRequest,
+    RoomCodeJoinRequest,
     RoomCreateRequest,
+    RoomInviteRequest,
+    RoomInviteResponse,
     RoomJoinRequest,
     RoomLeaveResponse,
     RoomSummary,
@@ -21,6 +30,8 @@ from ..room_store import (
     create_room,
     get_participant_role,
     get_room,
+    get_or_create_invite_token,
+    is_valid_invite_token,
     join_room,
     leave_room,
     list_public_rooms,
@@ -47,8 +58,9 @@ def _room_not_found() -> HTTPException:
     )
 
 
-def _join_url(room_id: int) -> str:
-    return f"{PUBLIC_APP_URL}/rooms/{room_id}"
+def _join_url(room_id: int, invite_token: str) -> str:
+    query = urlencode({"token": invite_token})
+    return f"{PUBLIC_APP_URL}/room/{room_id}?{query}"
 
 
 def _access_response(
@@ -56,11 +68,19 @@ def _access_response(
     role: str,
     participant_token: str,
 ) -> RoomAccessResponse:
+    try:
+        invite_token = get_or_create_invite_token(room["id"])
+    except RedisError as exc:
+        logger.exception("Could not read invite token for room %s", room["id"])
+        raise _service_unavailable() from exc
+    if invite_token is None:
+        raise _room_not_found()
+
     return RoomAccessResponse(
         **room,
         role=role,
         participant_token=participant_token,
-        join_url=_join_url(room["id"]),
+        join_url=_join_url(room["id"], invite_token),
     )
 
 
@@ -111,30 +131,24 @@ def get_public_rooms() -> list[RoomSummary]:
     return [RoomSummary(**room) for room in rooms]
 
 
-@router.get(
-    "/{room_id}",
-    response_model=RoomSummary,
-    summary="Get room details by shareable room ID",
-)
-def get_room_details(room_id: int) -> RoomSummary:
-    """Return a room's public details for a direct invitation link."""
-    room = _room_summary(room_id)
-    if room is None:
-        raise _room_not_found()
-    return RoomSummary(**room)
-
-
-@router.post(
-    "/{room_id}/join",
-    response_model=RoomAccessResponse,
-    summary="Join a room as a player or spectator",
-)
-def join_public_room(
+def _join_room_response(
     room_id: int,
     payload: RoomJoinRequest,
     background_tasks: BackgroundTasks,
 ) -> RoomAccessResponse:
-    """Assign the second player slot or make the joiner a spectator."""
+    room = _room_summary(room_id)
+    if room is None:
+        raise _room_not_found()
+
+    if payload.invite_token is not None:
+        try:
+            valid_invite = is_valid_invite_token(room_id, payload.invite_token)
+        except RedisError as exc:
+            logger.exception("Could not validate invitation for room %s", room_id)
+            raise _service_unavailable() from exc
+        if not valid_invite:
+            raise HTTPException(status_code=403, detail="The room invitation link is invalid")
+
     participant_token = payload.participant_token or secrets.token_urlsafe(32)
     try:
         role = join_room(room_id, participant_token)
@@ -160,6 +174,117 @@ def join_public_room(
             {"type": "room.updated", "room": room},
         )
     return _access_response(room, role, participant_token)
+
+
+@router.post(
+    "/join",
+    response_model=RoomAccessResponse,
+    summary="Join a public room using its numeric room code",
+)
+def join_room_by_code(
+    payload: RoomCodeJoinRequest,
+    background_tasks: BackgroundTasks,
+) -> RoomAccessResponse:
+    """Resolve a lobby-entered room code and join that public room."""
+    return _join_room_response(
+        int(payload.room_code),
+        RoomJoinRequest(
+            participant_token=payload.participant_token,
+            invite_token=payload.invite_token,
+        ),
+        background_tasks,
+    )
+
+
+@router.get(
+    "/{room_id}",
+    response_model=RoomSummary,
+    summary="Get room details by shareable room ID",
+)
+def get_room_details(room_id: int) -> RoomSummary:
+    """Return a room's public details for a direct invitation link."""
+    room = _room_summary(room_id)
+    if room is None:
+        raise _room_not_found()
+    return RoomSummary(**room)
+
+
+@router.post(
+    "/{room_id}/join",
+    response_model=RoomAccessResponse,
+    summary="Join a room as a player or spectator",
+)
+def join_public_room(
+    room_id: int,
+    payload: RoomJoinRequest,
+    background_tasks: BackgroundTasks,
+) -> RoomAccessResponse:
+    """Assign the second player slot or make the joiner a spectator."""
+    return _join_room_response(room_id, payload, background_tasks)
+
+
+@router.post(
+    "/{room_id}/invite",
+    response_model=RoomInviteResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Email a friend a direct room invitation",
+)
+def email_room_invitation(
+    room_id: int,
+    payload: RoomInviteRequest,
+) -> RoomInviteResponse:
+    """Send the host's room link and numeric room code to a friend."""
+    room = _room_summary(room_id)
+    if room is None:
+        raise _room_not_found()
+
+    try:
+        role = get_participant_role(room_id, payload.participant_token)
+    except RedisError as exc:
+        logger.exception("Could not validate room host for room %s", room_id)
+        raise _service_unavailable() from exc
+
+    if role != "player1":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the room host can email invitations",
+        )
+
+    try:
+        invite_token = get_or_create_invite_token(room_id)
+    except RedisError as exc:
+        logger.exception("Could not load invite link for room %s", room_id)
+        raise _service_unavailable() from exc
+    if invite_token is None:
+        raise _room_not_found()
+
+    join_url = _join_url(room_id, invite_token)
+    try:
+        send_room_invitation_email(
+            recipient=str(payload.email),
+            room_name=room["name"],
+            room_code=str(room_id),
+            join_url=join_url,
+        )
+    except EmailConfigurationError as exc:
+        logger.exception("Room invitation email service is not configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email service is not configured",
+        ) from exc
+    except EmailDeliveryError as exc:
+        logger.exception("Could not send room invitation for room %s", room_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not send invitation email",
+        ) from exc
+
+    return RoomInviteResponse(
+        message="Invitation email sent",
+        email=payload.email,
+        room_code=str(room_id),
+        join_url=join_url,
+    )
 
 
 @router.post(

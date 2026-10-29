@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class RoomCreateRequest(BaseModel):
@@ -20,15 +20,28 @@ class RoomCreateRequest(BaseModel):
 
 
 class RoomJoinRequest(BaseModel):
-    """Optional existing token used to reconnect to a room."""
+    """Optional participant or invitation token used to join a room."""
 
     participant_token: str | None = Field(default=None, min_length=32, max_length=128)
+    invite_token: str | None = Field(default=None, min_length=32, max_length=128)
+
+
+class RoomCodeJoinRequest(RoomJoinRequest):
+    """Numeric room code and optional tokens used from the public lobby."""
+
+    room_code: str = Field(pattern=r"^[0-9]{1,10}$", examples=["123"])
 
 
 class RoomActionRequest(BaseModel):
     """Capability token required for start and leave operations."""
 
     participant_token: str = Field(min_length=32, max_length=128)
+
+
+class RoomInviteRequest(RoomActionRequest):
+    """Host credentials and recipient address for a direct email invitation."""
+
+    email: EmailStr
 
 
 class RoomSummary(BaseModel):
@@ -56,3 +69,10 @@ class RoomLeaveResponse(BaseModel):
 
     message: str
     room_deleted: bool
+
+
+class RoomInviteResponse(BaseModel):
+    message: str
+    email: EmailStr
+    room_code: str
+    join_url: str
