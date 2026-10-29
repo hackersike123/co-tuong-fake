@@ -28,3 +28,7 @@ SMTP_FROM_NAME = os.getenv("SMTP_FROM_NAME", "Co Tuong")
 SMTP_USE_SSL = _env_bool("SMTP_USE_SSL", False)
 SMTP_STARTTLS = _env_bool("SMTP_STARTTLS", True)
 SMTP_TIMEOUT_SECONDS = float(os.getenv("SMTP_TIMEOUT_SECONDS", "10"))
+
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "15"))
+REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60

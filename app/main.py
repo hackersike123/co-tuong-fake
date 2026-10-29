@@ -5,7 +5,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
-from .database import Base, engine
+from .database import Base, engine, upgrade_sqlite_schema
 from .routers.auth import router as auth_router
 from .routers.rooms import router as rooms_router
 
@@ -14,6 +14,7 @@ from .routers.rooms import router as rooms_router
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Create development tables when the application starts."""
     Base.metadata.create_all(bind=engine)
+    upgrade_sqlite_schema()
     yield
 
 
