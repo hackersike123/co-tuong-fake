@@ -28,6 +28,8 @@ from app.xiangqi import (
     is_stalemate,
     legal_moves,
     legal_moves_from,
+    make_move,
+    undo_move,
     _piece_destinations,
 )
 
@@ -624,6 +626,43 @@ def test_move_updates_side_to_move_and_fen_fullmove_number() -> None:
     assert after_black.turn is Side.RED
     assert after_black.fullmove_number == 2
     assert XiangqiState.from_fen(after_black.to_fen()).to_fen() == after_black.to_fen()
+
+
+def test_make_move_and_undo_restore_the_complete_previous_state() -> None:
+    initial = XiangqiState.initial()
+    after_red = make_move(initial, Move((9, 1), (7, 0)))
+    after_black = make_move(after_red, Move((0, 1), (2, 0)))
+
+    assert after_red is not initial
+    assert after_red.turn is Side.BLACK
+    assert len(after_red.move_history) == 1
+    assert undo_move(after_black) == after_red
+    assert undo_move(after_red) == initial
+
+
+def test_undo_capture_restores_piece_and_move_counters() -> None:
+    state = make_state(
+        pieces=[
+            (Side.RED, PieceKind.ROOK, (5, 0)),
+            (Side.BLACK, PieceKind.PAWN, (5, 2)),
+        ],
+        halfmove_clock=18,
+        natural_move_counts=(20, 17),
+        natural_check_counts=(4, 2),
+    )
+
+    after_capture = make_move(state, Move((5, 0), (5, 2)))
+
+    assert after_capture.board[5][2] is not None
+    assert after_capture.board[5][2].kind is PieceKind.ROOK
+    assert after_capture.halfmove_clock == 0
+    assert after_capture.natural_move_counts == (0, 0)
+    assert undo_move(after_capture) == state
+
+
+def test_undo_move_requires_a_previous_move() -> None:
+    with pytest.raises(ValueError, match="There is no move to undo"):
+        undo_move(XiangqiState.initial())
 
 
 def test_illegal_move_is_rejected() -> None:
