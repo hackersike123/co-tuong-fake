@@ -7,6 +7,7 @@ from typing import Any
 from redis import Redis
 
 from .settings import REDIS_URL
+from .xiangqi import STARTING_FEN
 
 
 redis_client = Redis.from_url(
@@ -55,8 +56,112 @@ local player2_token = redis.call('HGET', KEYS[1], 'player2_token')
 if not player2_token or player2_token == '' then
     return -4
 end
-redis.call('HSET', KEYS[1], 'status', 'playing')
+local timer_seconds = tonumber(redis.call('HGET', KEYS[1], 'timer_seconds') or '30')
+local redis_time = redis.call('TIME')
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('HSET', KEYS[1],
+    'status', 'playing',
+    'game_fen', ARGV[3],
+    'game_version', 0,
+    'side_to_move', 'w',
+    'red_time_ms', timer_seconds * 1000,
+    'black_time_ms', timer_seconds * 1000,
+    'turn_started_at_ms', now_ms,
+    'game_result', '',
+    'game_winner', '')
 redis.call('ZREM', KEYS[2], ARGV[2])
+return 1
+"""
+
+_APPLY_GAME_MOVE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return -1
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'playing' then
+    return -1
+end
+local version = tonumber(redis.call('HGET', KEYS[1], 'game_version') or '-1')
+if version ~= tonumber(ARGV[1])
+    or redis.call('HGET', KEYS[1], 'game_fen') ~= ARGV[2]
+    or redis.call('HGET', KEYS[1], 'side_to_move') ~= ARGV[3] then
+    return -2
+end
+local clock_field = 'red_time_ms'
+local next_side = 'b'
+local timeout_winner = 'b'
+if ARGV[3] == 'b' then
+    clock_field = 'black_time_ms'
+    next_side = 'w'
+    timeout_winner = 'w'
+elseif ARGV[3] ~= 'w' then
+    return -2
+end
+if ARGV[4] ~= next_side then
+    return -2
+end
+local redis_time = redis.call('TIME')
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+local remaining_ms = tonumber(redis.call('HGET', KEYS[1], clock_field) or '0')
+local turn_started_at_ms = tonumber(redis.call('HGET', KEYS[1], 'turn_started_at_ms') or now_ms)
+remaining_ms = remaining_ms - math.max(0, now_ms - turn_started_at_ms)
+if remaining_ms <= 0 then
+    local next_version = version + 1
+    redis.call('HSET', KEYS[1],
+        clock_field, 0,
+        'status', 'finished',
+        'game_result', 'timeout',
+        'game_winner', timeout_winner,
+        'game_version', next_version)
+    return -3
+end
+local next_version = version + 1
+redis.call('HSET', KEYS[1],
+    clock_field, remaining_ms,
+    'game_fen', ARGV[5],
+    'game_version', next_version,
+    'side_to_move', next_side,
+    'turn_started_at_ms', now_ms)
+if ARGV[6] ~= '' then
+    redis.call('HSET', KEYS[1],
+        'status', 'finished',
+        'game_result', ARGV[6],
+        'game_winner', ARGV[7])
+end
+return 1
+"""
+
+_TIMEOUT_ROOM_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'status') ~= 'playing' then
+    return 0
+end
+local version = tonumber(redis.call('HGET', KEYS[1], 'game_version') or '-1')
+if version ~= tonumber(ARGV[1]) then
+    return 0
+end
+local side = redis.call('HGET', KEYS[1], 'side_to_move')
+local clock_field = 'red_time_ms'
+local winner = 'b'
+if side == 'b' then
+    clock_field = 'black_time_ms'
+    winner = 'w'
+elseif side ~= 'w' then
+    return 0
+end
+local redis_time = redis.call('TIME')
+local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
+local remaining_ms = tonumber(redis.call('HGET', KEYS[1], clock_field) or '0')
+local turn_started_at_ms = tonumber(redis.call('HGET', KEYS[1], 'turn_started_at_ms') or now_ms)
+remaining_ms = remaining_ms - math.max(0, now_ms - turn_started_at_ms)
+if remaining_ms > 0 then
+    return 0
+end
+redis.call('HSET', KEYS[1],
+    clock_field, 0,
+    'status', 'finished',
+    'game_result', 'timeout',
+    'game_winner', winner,
+    'game_version', version + 1)
 return 1
 """
 
@@ -101,8 +206,14 @@ def _spectators_key(room_id: int) -> str:
     return f"room:{room_id}:spectators"
 
 
-def create_room(name: str, host_name: str = "Khách") -> tuple[dict[str, Any], str]:
+def create_room(
+    name: str,
+    host_name: str = "Khách",
+    timer_seconds: int = 30,
+) -> tuple[dict[str, Any], str]:
     """Create a public waiting room and assign its creator to player slot one."""
+    if timer_seconds not in {15, 30, 60}:
+        raise ValueError("Room timer must be 15, 30, or 60 seconds")
     room_id = int(redis_client.incr(ROOM_SEQUENCE_KEY))
     host_token = secrets.token_urlsafe(32)
     invite_token = secrets.token_urlsafe(32)
@@ -115,6 +226,7 @@ def create_room(name: str, host_name: str = "Khách") -> tuple[dict[str, Any], s
             "id": room_id,
             "name": name,
             "host_name": host_name,
+            "timer_seconds": timer_seconds,
             "visibility": "public",
             "status": "waiting",
             "host_token": host_token,
@@ -172,6 +284,7 @@ def get_room(room_id: int) -> dict[str, Any] | None:
         "id": int(values["id"]),
         "name": values["name"],
         "host_name": values.get("host_name", "Khách"),
+        "timer_seconds": int(values.get("timer_seconds", 30)),
         "visibility": values["visibility"],
         "status": values["status"],
         "player_count": player_count,
@@ -225,6 +338,88 @@ def start_room(room_id: int, host_token: str) -> int:
             PUBLIC_ROOMS_KEY,
             host_token,
             room_id,
+            STARTING_FEN,
+        )
+    )
+
+
+def get_game_snapshot(room_id: int) -> dict[str, Any] | None:
+    """Read board state and calculate live clocks using Redis server time."""
+    values = redis_client.hgetall(_room_key(room_id))
+    if not values or not values.get("game_fen"):
+        return None
+
+    redis_seconds, redis_microseconds = redis_client.time()
+    server_time_ms = int(redis_seconds) * 1000 + int(redis_microseconds) // 1000
+    side_to_move = values.get("side_to_move", "w")
+    red_time_ms = int(values.get("red_time_ms", 0))
+    black_time_ms = int(values.get("black_time_ms", 0))
+    if values.get("status") == "playing":
+        elapsed_ms = max(
+            0,
+            server_time_ms - int(values.get("turn_started_at_ms", server_time_ms)),
+        )
+        if side_to_move == "w":
+            red_time_ms = max(0, red_time_ms - elapsed_ms)
+        else:
+            black_time_ms = max(0, black_time_ms - elapsed_ms)
+
+    return {
+        "room_id": room_id,
+        "fen": values["game_fen"],
+        "version": int(values.get("game_version", 0)),
+        "side_to_move": side_to_move,
+        "red_time_ms": red_time_ms,
+        "black_time_ms": black_time_ms,
+        "timer_seconds": int(values.get("timer_seconds", 30)),
+        "status": values.get("status", "playing"),
+        "result": values.get("game_result") or None,
+        "winner": values.get("game_winner") or None,
+        "server_time_ms": server_time_ms,
+    }
+
+
+def apply_game_move(
+    room_id: int,
+    expected_version: int,
+    expected_fen: str,
+    moving_side: str,
+    next_side: str,
+    next_fen: str,
+    result: str | None = None,
+    winner: str | None = None,
+) -> int:
+    """Atomically apply a validated move and charge its mover's clock.
+
+    Returns 1 when applied, -1 when the game is no longer playing, -2 when
+    another update won the race, and -3 when the mover timed out first.
+    """
+    if moving_side not in {"w", "b"} or next_side not in {"w", "b"}:
+        raise ValueError("Move sides must be 'w' or 'b'")
+    return int(
+        redis_client.eval(
+            _APPLY_GAME_MOVE_SCRIPT,
+            1,
+            _room_key(room_id),
+            expected_version,
+            expected_fen,
+            moving_side,
+            next_side,
+            next_fen,
+            result or "",
+            winner or "",
+        )
+    )
+
+
+def timeout_room(room_id: int, expected_version: int) -> bool:
+    """Finish a room as a timeout if the active side's server clock expired."""
+    return bool(
+        redis_client.eval(
+            _TIMEOUT_ROOM_SCRIPT,
+            1,
+            _room_key(room_id),
+            expected_version,
         )
     )
 
