@@ -24,6 +24,10 @@ if not code then
     return -1
 end
 if code == ARGV[1] then
+    if ARGV[4] == 'consume' then
+        redis.call('DEL', KEYS[1])
+        redis.call('DEL', KEYS[2])
+    end
     return 1
 end
 local attempts = redis.call('INCR', KEYS[2])
@@ -47,6 +51,14 @@ def _attempts_key(user_id: int) -> str:
     return f"email-otp-attempts:{user_id}"
 
 
+def _password_reset_otp_key(user_id: int) -> str:
+    return f"password-reset-otp:{user_id}"
+
+
+def _password_reset_attempts_key(user_id: int) -> str:
+    return f"password-reset-otp-attempts:{user_id}"
+
+
 def _issue_otp(code_key: str, attempts_key: str) -> str:
     otp = f"{secrets.randbelow(1_000_000):06d}"
     pipeline = redis_client.pipeline(transaction=True)
@@ -56,7 +68,7 @@ def _issue_otp(code_key: str, attempts_key: str) -> str:
     return otp
 
 
-def _check_otp(code_key: str, attempts_key: str, otp: str) -> int:
+def _check_otp(code_key: str, attempts_key: str, otp: str, *, consume: bool) -> int:
     result = redis_client.eval(
         _VERIFY_OTP_SCRIPT,
         2,
@@ -65,6 +77,7 @@ def _check_otp(code_key: str, attempts_key: str, otp: str) -> int:
         otp,
         OTP_TTL_SECONDS,
         MAX_OTP_ATTEMPTS,
+        "consume" if consume else "keep",
     )
     return int(result)
 
@@ -80,9 +93,35 @@ def verify_email_otp(user_id: int, otp: str) -> int:
     Returns 1 for a match, 0 for a wrong code, -1 for an expired code, and
     -2 after the maximum number of incorrect attempts.
     """
-    return _check_otp(_otp_key(user_id), _attempts_key(user_id), otp)
+    return _check_otp(_otp_key(user_id), _attempts_key(user_id), otp, consume=False)
 
 
 def clear_email_otp(user_id: int) -> None:
     """Remove the code and its attempt counter after registration completes."""
     redis_client.delete(_otp_key(user_id), _attempts_key(user_id))
+
+
+def issue_password_reset_otp(user_id: int) -> str:
+    """Create a cryptographically random password-reset OTP with a 5-minute TTL."""
+    return _issue_otp(
+        _password_reset_otp_key(user_id),
+        _password_reset_attempts_key(user_id),
+    )
+
+
+def consume_password_reset_otp(user_id: int, otp: str) -> int:
+    """Check a reset code and atomically consume it if it matches."""
+    return _check_otp(
+        _password_reset_otp_key(user_id),
+        _password_reset_attempts_key(user_id),
+        otp,
+        consume=True,
+    )
+
+
+def clear_password_reset_otp(user_id: int) -> None:
+    """Remove the password-reset code and its attempt counter."""
+    redis_client.delete(
+        _password_reset_otp_key(user_id),
+        _password_reset_attempts_key(user_id),
+    )

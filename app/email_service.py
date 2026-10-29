@@ -48,6 +48,20 @@ def send_verification_email(recipient: str, otp: str) -> None:
     )
 
 
+def send_password_reset_email(recipient: str, otp: str) -> None:
+    """Send a short-lived password reset code through the configured SMTP provider."""
+    _send_otp_email(
+        recipient=recipient,
+        otp=otp,
+        subject="Reset your Co Tuong password",
+        body=(
+            f"Your Co Tuong password reset code is: {otp}\n\n"
+            "This code expires in 5 minutes. If you did not request a password reset, "
+            "you can ignore this email."
+        ),
+    )
+
+
 def _send_otp_email(recipient: str, otp: str, subject: str, body: str) -> None:
     """Send an OTP email through the configured SMTP settings."""
     ensure_email_configured()
