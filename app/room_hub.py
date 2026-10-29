@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
 from collections import defaultdict
 from typing import Any
 
@@ -10,7 +9,12 @@ from fastapi import WebSocket, WebSocketDisconnect
 from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
 
-from .room_store import get_game_snapshot, timeout_room
+from .room_store import (
+    delete_room,
+    finalize_reconnect_forfeit,
+    get_game_snapshot,
+    timeout_room,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -22,22 +26,36 @@ class RoomHub:
     def __init__(self) -> None:
         self._lobby_clients: set[WebSocket] = set()
         self._room_clients: dict[int, set[WebSocket]] = defaultdict(set)
+        self._room_participant_tokens: dict[WebSocket, str] = {}
+        self._outbound_queues: dict[WebSocket, asyncio.Queue[dict[str, Any]]] = {}
+        self._sender_tasks: dict[WebSocket, asyncio.Task[None]] = {}
+        self._send_locks: dict[WebSocket, asyncio.Lock] = {}
         self._timer_tasks: dict[int, asyncio.Task[None]] = {}
+        self._reconnect_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
 
     async def connect_lobby(self, websocket: WebSocket) -> None:
         await websocket.accept()
         async with self._lock:
             self._lobby_clients.add(websocket)
+            self._prepare_sender(websocket)
 
     async def disconnect_lobby(self, websocket: WebSocket) -> None:
         async with self._lock:
             self._lobby_clients.discard(websocket)
+            self._remove_sender(websocket)
 
-    async def connect_room(self, room_id: int, websocket: WebSocket) -> None:
+    async def connect_room(
+        self,
+        room_id: int,
+        websocket: WebSocket,
+        participant_token: str,
+    ) -> None:
         await websocket.accept()
         async with self._lock:
             self._room_clients[room_id].add(websocket)
+            self._room_participant_tokens[websocket] = participant_token
+            self._prepare_sender(websocket)
 
     async def disconnect_room(self, room_id: int, websocket: WebSocket) -> None:
         async with self._lock:
@@ -47,20 +65,63 @@ class RoomHub:
             clients.discard(websocket)
             if not clients:
                 self._room_clients.pop(room_id, None)
+            self._room_participant_tokens.pop(websocket, None)
+            self._remove_sender(websocket)
+
+    async def has_participant_connection(
+        self,
+        room_id: int,
+        participant_token: str,
+    ) -> bool:
+        """Check whether another local socket still represents this participant."""
+        async with self._lock:
+            return any(
+                websocket in self._room_clients.get(room_id, ())
+                and token == participant_token
+                for websocket, token in self._room_participant_tokens.items()
+            )
+
+    def _prepare_sender(self, websocket: WebSocket) -> None:
+        self._outbound_queues[websocket] = asyncio.Queue()
+        self._send_locks[websocket] = asyncio.Lock()
+
+    def _remove_sender(self, websocket: WebSocket) -> None:
+        self._outbound_queues.pop(websocket, None)
+        self._send_locks.pop(websocket, None)
+        task = self._sender_tasks.pop(websocket, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    async def start_sender(self, websocket: WebSocket) -> None:
+        """Start queued event delivery after the socket's initial snapshot."""
+        async with self._lock:
+            queue = self._outbound_queues.get(websocket)
+            task = self._sender_tasks.get(websocket)
+            if queue is None or (task is not None and not task.done()):
+                return
+            self._sender_tasks[websocket] = asyncio.create_task(
+                self._send_loop(websocket, queue),
+                name="room-websocket-sender",
+            )
+
+    async def send_to_client(self, websocket: WebSocket, event: dict[str, Any]) -> None:
+        """Serialize direct replies with queued broadcasts for this socket."""
+        lock = self._send_locks.get(websocket)
+        if lock is None:
+            await websocket.send_json(event)
+            return
+        async with lock:
+            await websocket.send_json(event)
 
     async def broadcast_lobby(self, event: dict[str, Any]) -> None:
         async with self._lock:
             clients = tuple(self._lobby_clients)
-        await self._broadcast(clients, event, self.disconnect_lobby)
+        await self._broadcast(clients, event)
 
     async def broadcast_room(self, room_id: int, event: dict[str, Any]) -> None:
         async with self._lock:
             clients = tuple(self._room_clients.get(room_id, ()))
-        await self._broadcast(
-            clients,
-            event,
-            lambda websocket: self.disconnect_room(room_id, websocket),
-        )
+        await self._broadcast(clients, event)
 
     async def ensure_timer(self, room_id: int) -> None:
         """Start one server-side timer loop for an active room."""
@@ -86,10 +147,112 @@ class RoomHub:
         if task is None or task is asyncio.current_task():
             return
         task.cancel()
+
+    async def stop_reconnect_timeout(self, room_id: int, role: str) -> None:
+        """Cancel the reconnect deadline after that player returns or leaves."""
+        task = self._reconnect_tasks.pop((room_id, role), None)
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+
+    async def stop_room_timers(self, room_id: int) -> None:
+        """Stop game and reconnect timers for a room that is closing or finished."""
+        await self.stop_timer(room_id)
+        for task_room_id, role in tuple(self._reconnect_tasks):
+            if task_room_id == room_id:
+                await self.stop_reconnect_timeout(room_id, role)
+
+    async def schedule_reconnect_timeout(
+        self,
+        room_id: int,
+        role: str,
+        deadline_ms: int,
+        delay_ms: int,
+    ) -> None:
+        """Schedule the server's 60-second grace period for a disconnected player."""
+        await self.stop_reconnect_timeout(room_id, role)
+        self._reconnect_tasks[(room_id, role)] = asyncio.create_task(
+            self._reconnect_timeout_loop(room_id, role, deadline_ms, delay_ms),
+            name=f"room-reconnect-{room_id}-{role}",
+        )
+
+    async def publish_forfeit(self, room_id: int, event: dict[str, Any]) -> None:
+        """Stop all clocks and tell the room that a player forfeited."""
+        await self.stop_room_timers(room_id)
+        await self.broadcast_room(room_id, event)
+
+    async def close_after_forfeit(self, room_id: int, event: dict[str, Any]) -> None:
+        """Broadcast a host's loss before deleting the room and closing its clients."""
+        await self.stop_room_timers(room_id)
+        await self.broadcast_room(room_id, event)
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            deleted = await run_in_threadpool(delete_room, room_id)
+        except RedisError:
+            logger.exception("Could not delete forfeited room %s", room_id)
+            return
+        if deleted:
+            await self.broadcast_lobby(
+                {"type": "room.removed", "room_id": room_id, "reason": "host_forfeit"}
+            )
+            await self.broadcast_room(
+                room_id,
+                {"type": "room.closed", "room_id": room_id, "reason": "host_forfeit"},
+            )
+
+    async def _reconnect_timeout_loop(
+        self,
+        room_id: int,
+        role: str,
+        deadline_ms: int,
+        delay_ms: int,
+    ) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(max(0, delay_ms) / 1000)
+            while True:
+                try:
+                    result = await run_in_threadpool(
+                        finalize_reconnect_forfeit,
+                        room_id,
+                        role,
+                        deadline_ms,
+                    )
+                except RedisError:
+                    logger.exception(
+                        "Could not finalize reconnect deadline for room %s (%s)",
+                        room_id,
+                        role,
+                    )
+                    await asyncio.sleep(1)
+                    continue
+
+                if result == -1:
+                    # The local worker clock can wake slightly before Redis time.
+                    await asyncio.sleep(0.25)
+                    continue
+                if result == 1:
+                    try:
+                        game = await run_in_threadpool(get_game_snapshot, room_id)
+                    except RedisError:
+                        logger.exception("Could not read forfeited game %s", room_id)
+                        return
+                    await self.stop_room_timers(room_id)
+                    if game is not None:
+                        await self.broadcast_room(
+                            room_id,
+                            {
+                                "type": "game.forfeit",
+                                "room_id": room_id,
+                                "reason": "reconnect_timeout",
+                                "loser_role": role,
+                                "game": game,
+                            },
+                        )
+                return
+        finally:
+            key = (room_id, role)
+            if self._reconnect_tasks.get(key) is current_task:
+                self._reconnect_tasks.pop(key, None)
 
     async def _timer_loop(self, room_id: int) -> None:
         current_task = asyncio.current_task()
@@ -104,6 +267,8 @@ class RoomHub:
 
                 if snapshot is None or snapshot["status"] != "playing":
                     return
+                if snapshot["paused"]:
+                    continue
 
                 active_clock = (
                     snapshot["red_time_ms"]
@@ -147,6 +312,7 @@ class RoomHub:
                         "side_to_move": snapshot["side_to_move"],
                         "red_time_ms": snapshot["red_time_ms"],
                         "black_time_ms": snapshot["black_time_ms"],
+                        "paused": snapshot["paused"],
                         "server_time_ms": snapshot["server_time_ms"],
                     },
                 )
@@ -158,17 +324,31 @@ class RoomHub:
         self,
         clients: tuple[WebSocket, ...],
         event: dict[str, Any],
-        disconnect: Callable[[WebSocket], Awaitable[None]],
     ) -> None:
-        stale_clients: list[WebSocket] = []
         for websocket in clients:
-            try:
-                await websocket.send_json(event)
-            except (RuntimeError, WebSocketDisconnect):
-                stale_clients.append(websocket)
+            queue = self._outbound_queues.get(websocket)
+            if queue is None:
+                continue
+            # Coalesce timer ticks when a client is slow so lifecycle events
+            # remain ordered and do not get stuck behind stale clock updates.
+            if event.get("type") == "timer_tick" and queue.qsize() > 0:
+                continue
+            queue.put_nowait(event)
 
-        for websocket in stale_clients:
-            await disconnect(websocket)
+    async def _send_loop(
+        self,
+        websocket: WebSocket,
+        queue: asyncio.Queue[dict[str, Any]],
+    ) -> None:
+        while True:
+            event = await queue.get()
+            try:
+                await self.send_to_client(websocket, event)
+            except (RuntimeError, WebSocketDisconnect):
+                logger.debug("WebSocket send failed; waiting for disconnect cleanup")
+                return
+            finally:
+                queue.task_done()
 
 
 room_hub = RoomHub()
