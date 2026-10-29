@@ -13,8 +13,10 @@ from typing import Iterator, TypeAlias
 
 BOARD_ROWS = 10
 BOARD_COLUMNS = 9
-FEN_FIFTY_MOVE_LIMIT = 100
 REPETITION_DRAW_OCCURRENCES = 4
+REPETITION_ADJUDICATION_OCCURRENCES = 3
+NATURAL_MOVE_LIMIT_PER_SIDE = 100
+NATURAL_CHECK_LIMIT_PER_SIDE = 10
 
 STARTING_FEN = "rheakaehr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RHEAKAEHR w - - 0 1"
 
@@ -46,16 +48,21 @@ class GameStatus(str, Enum):
     CHECKMATE = "checkmate"
     STALEMATE = "stalemate"
     DRAW = "draw"
+    PERPETUAL_CHECK_LOSS = "perpetual_check_loss"
+    PERPETUAL_CHASE_LOSS = "perpetual_chase_loss"
 
 
 @dataclass(frozen=True)
 class Piece:
     side: Side
     kind: PieceKind
+    identity: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "side", Side(self.side))
         object.__setattr__(self, "kind", PieceKind(self.kind))
+        if self.identity is not None and self.identity < 1:
+            raise ValueError("Piece identity must be a positive integer")
 
 
 Board: TypeAlias = tuple[tuple[Piece | None, ...], ...]
@@ -74,32 +81,88 @@ class Move:
 
 
 @dataclass(frozen=True)
+class ChaseThreat:
+    """A legal next-move capture threat recorded for WXF repetition ruling."""
+
+    target_id: int
+    target_kind: PieceKind
+    target_is_unadvanced_pawn: bool
+    chaser_ids: tuple[int, ...]
+    chaser_kinds: tuple[PieceKind, ...]
+    has_real_root: bool
+
+
+@dataclass(frozen=True)
+class MoveRecord:
+    mover: Side
+    move: Move
+    moved_piece_id: int
+    gives_check: bool
+    chased_targets: tuple[ChaseThreat, ...] = ()
+    captured_piece_id: int | None = None
+
+
+@dataclass(frozen=True)
 class XiangqiState:
-    """Immutable Xiangqi position and the history needed for repetition draws."""
+    """Immutable Xiangqi position and move history for tournament rulings."""
 
     board: Board
     turn: Side = Side.RED
     halfmove_clock: int = 0
     fullmove_number: int = 1
+    natural_move_counts: tuple[int, int] = (0, 0)
+    natural_check_counts: tuple[int, int] = (0, 0)
     position_history: tuple[str, ...] = ()
+    move_history: tuple[MoveRecord, ...] = ()
 
     def __post_init__(self) -> None:
-        rows = tuple(tuple(row) for row in self.board)
+        source_rows = tuple(tuple(row) for row in self.board)
+        if len(source_rows) != BOARD_ROWS or any(
+            len(row) != BOARD_COLUMNS for row in source_rows
+        ):
+            raise ValueError("A Xiangqi board must have 10 rows and 9 columns")
+        if any(
+            piece is not None and not isinstance(piece, Piece)
+            for row in source_rows
+            for piece in row
+        ):
+            raise ValueError("Board squares must contain Piece instances or None")
+
+        identities = [
+            piece.identity
+            for row in source_rows
+            for piece in row
+            if piece is not None and piece.identity is not None
+        ]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Piece identities must be unique within a position")
+        next_identity = max(identities, default=0) + 1
+        normalized_rows: list[tuple[Piece | None, ...]] = []
+        for row in source_rows:
+            normalized_row: list[Piece | None] = []
+            for piece in row:
+                if piece is not None and piece.identity is None:
+                    piece = Piece(piece.side, piece.kind, next_identity)
+                    next_identity += 1
+                normalized_row.append(piece)
+            normalized_rows.append(tuple(normalized_row))
+        rows = tuple(normalized_rows)
         object.__setattr__(self, "board", rows)
         object.__setattr__(self, "turn", Side(self.turn))
 
-        if len(rows) != BOARD_ROWS or any(len(row) != BOARD_COLUMNS for row in rows):
-            raise ValueError("A Xiangqi board must have 10 rows and 9 columns")
         if self.halfmove_clock < 0:
             raise ValueError("The halfmove clock cannot be negative")
         if self.fullmove_number < 1:
             raise ValueError("The fullmove number must be positive")
+        for counter_name in ("natural_move_counts", "natural_check_counts"):
+            counters = tuple(getattr(self, counter_name))
+            if len(counters) != 2 or any(count < 0 for count in counters):
+                raise ValueError(f"{counter_name} must contain two nonnegative values")
+            object.__setattr__(self, counter_name, counters)
 
         general_counts = {Side.RED: 0, Side.BLACK: 0}
         for row in rows:
             for piece in row:
-                if piece is not None and not isinstance(piece, Piece):
-                    raise ValueError("Board squares must contain Piece instances or None")
                 if piece is not None and piece.kind is PieceKind.GENERAL:
                     general_counts[piece.side] += 1
         if any(count != 1 for count in general_counts.values()):
@@ -111,7 +174,11 @@ class XiangqiState:
             history = (current_key,)
         elif history[-1] != current_key:
             raise ValueError("The last history entry must match the current position")
+        move_history = tuple(self.move_history)
+        if len(move_history) != len(history) - 1:
+            raise ValueError("Move history must contain one record per position transition")
         object.__setattr__(self, "position_history", history)
+        object.__setattr__(self, "move_history", move_history)
 
     @classmethod
     def initial(cls) -> XiangqiState:
@@ -413,6 +480,77 @@ def is_in_check(state: XiangqiState, side: Side | None = None) -> bool:
     return is_square_attacked(state, general_square, checked_side.opponent)
 
 
+def _pawn_has_crossed_river(piece: Piece, row: int) -> bool:
+    if piece.kind is not PieceKind.PAWN:
+        return True
+    return row <= 4 if piece.side is Side.RED else row >= 5
+
+
+def _has_real_root(state: XiangqiState, capture_move: Move) -> bool:
+    origin_row, origin_column = capture_move.origin
+    target_row, target_column = capture_move.destination
+    attacker = state.board[origin_row][origin_column]
+    target = state.board[target_row][target_column]
+    if attacker is None or target is None:
+        return False
+
+    rows = [list(row) for row in state.board]
+    rows[origin_row][origin_column] = None
+    rows[target_row][target_column] = attacker
+    after_capture = XiangqiState(
+        board=tuple(tuple(row) for row in rows),
+        turn=target.side,
+    )
+    return any(
+        move.destination == capture_move.destination
+        for move in legal_moves(after_capture, side=target.side)
+    )
+
+
+def _collect_chase_threats(state: XiangqiState, chaser_side: Side) -> tuple[ChaseThreat, ...]:
+    captures_by_target: dict[int, list[Move]] = {}
+    target_pieces: dict[int, Piece] = {}
+    target_rows: dict[int, int] = {}
+    for move in legal_moves(state, side=chaser_side):
+        target_row, target_column = move.destination
+        target = state.board[target_row][target_column]
+        if target is None or target.side is chaser_side or target.kind is PieceKind.GENERAL:
+            continue
+        if target.identity is None:
+            continue
+        captures_by_target.setdefault(target.identity, []).append(move)
+        target_pieces[target.identity] = target
+        target_rows[target.identity] = target_row
+
+    threats: list[ChaseThreat] = []
+    for target_id, capture_moves in captures_by_target.items():
+        target = target_pieces[target_id]
+        chasers: dict[int, PieceKind] = {}
+        has_real_root = False
+        for move in capture_moves:
+            attacker = state.board[move.origin[0]][move.origin[1]]
+            if attacker is None or attacker.identity is None:
+                continue
+            chasers[attacker.identity] = attacker.kind
+            has_real_root = has_real_root or _has_real_root(state, move)
+        if not chasers:
+            continue
+        threats.append(
+            ChaseThreat(
+                target_id=target_id,
+                target_kind=target.kind,
+                target_is_unadvanced_pawn=(
+                    target.kind is PieceKind.PAWN
+                    and not _pawn_has_crossed_river(target, target_rows[target_id])
+                ),
+                chaser_ids=tuple(sorted(chasers)),
+                chaser_kinds=tuple(chasers[chaser_id] for chaser_id in sorted(chasers)),
+                has_real_root=has_real_root,
+            )
+        )
+    return tuple(threats)
+
+
 def apply_move(state: XiangqiState, move: Move) -> XiangqiState:
     """Apply a legal move and return a new immutable state."""
     if move not in legal_moves(state):
@@ -437,12 +575,51 @@ def apply_move(state: XiangqiState, move: Move) -> XiangqiState:
     )
     next_fullmove = state.fullmove_number + (1 if state.turn is Side.BLACK else 0)
     next_key = _position_key(next_board, next_turn)
+
+    provisional = XiangqiState(
+        board=next_board,
+        turn=next_turn,
+        halfmove_clock=next_halfmove,
+        fullmove_number=next_fullmove,
+    )
+    gives_check = is_in_check(provisional, next_turn)
+
+    if captured_piece is not None:
+        natural_move_counts = (0, 0)
+        natural_check_counts = (0, 0)
+    else:
+        side_index = 0 if state.turn is Side.RED else 1
+        move_counts = list(state.natural_move_counts)
+        check_counts = list(state.natural_check_counts)
+        if not gives_check or check_counts[side_index] < NATURAL_CHECK_LIMIT_PER_SIDE:
+            move_counts[side_index] += 1
+            if gives_check:
+                check_counts[side_index] += 1
+        natural_move_counts = tuple(move_counts)
+        natural_check_counts = tuple(check_counts)
+
+    moved_piece_id = moving_piece.identity
+    if moved_piece_id is None:
+        raise ValueError("A piece on the board must have an identity")
+    move_record = MoveRecord(
+        mover=state.turn,
+        move=move,
+        moved_piece_id=moved_piece_id,
+        gives_check=gives_check,
+        chased_targets=_collect_chase_threats(provisional, state.turn),
+        captured_piece_id=(
+            captured_piece.identity if captured_piece is not None else None
+        ),
+    )
     return XiangqiState(
         board=next_board,
         turn=next_turn,
         halfmove_clock=next_halfmove,
         fullmove_number=next_fullmove,
+        natural_move_counts=natural_move_counts,
+        natural_check_counts=natural_check_counts,
         position_history=state.position_history + (next_key,),
+        move_history=state.move_history + (move_record,),
     )
 
 
@@ -457,14 +634,121 @@ def is_stalemate(state: XiangqiState, side: Side | None = None) -> bool:
     return not is_in_check(state, blocked_side) and not legal_moves(state, side=blocked_side)
 
 
-def is_draw(state: XiangqiState) -> bool:
-    """Detect bare-generals, fourfold repetition, and the 50-move FEN clock draw."""
-    if not legal_moves(state):
-        return False
-    if state.halfmove_clock >= FEN_FIFTY_MOVE_LIMIT:
-        return True
-    if state.position_history.count(state.position_key) >= REPETITION_DRAW_OCCURRENCES:
-        return True
+def _perpetual_chase_ruling(
+    records: tuple[MoveRecord, ...],
+    side: Side,
+) -> GameStatus | None:
+    move_indexes = [index for index, record in enumerate(records) if record.mover is side]
+    if not move_indexes:
+        return None
+
+    chase_sets = [
+        {
+            threat.target_id
+            for threat in records[index].chased_targets
+            if not threat.target_is_unadvanced_pawn
+        }
+        for index in move_indexes
+    ]
+    common_targets = set.intersection(*chase_sets) if chase_sets else set()
+
+    # Repeatedly chasing several targets is not penalized as a perpetual single-piece chase.
+    if all(len(targets) >= 2 for targets in chase_sets):
+        return GameStatus.DRAW
+    if not common_targets:
+        return None
+    if len(common_targets) > 1:
+        return GameStatus.DRAW
+
+    target_id = next(iter(common_targets))
+    threats: list[ChaseThreat] = []
+    for index in move_indexes:
+        threat = next(
+            (
+                item
+                for item in records[index].chased_targets
+                if item.target_id == target_id
+            ),
+            None,
+        )
+        if threat is None:
+            return None
+        response = records[(index + 1) % len(records)]
+        # WXF defines the response as moving the target away. Resolving it by
+        # capturing a chaser is also recognized when the capture is recorded.
+        if (
+            response.moved_piece_id != target_id
+            and response.captured_piece_id not in threat.chaser_ids
+        ):
+            return None
+        threats.append(threat)
+
+    if all(threat.has_real_root for threat in threats):
+        return GameStatus.DRAW
+
+    chaser_ids = {chaser_id for threat in threats for chaser_id in threat.chaser_ids}
+    chaser_kinds = {kind for threat in threats for kind in threat.chaser_kinds}
+    if PieceKind.GENERAL in chaser_kinds or PieceKind.PAWN in chaser_kinds:
+        return GameStatus.DRAW
+    if any(threat.target_kind in threat.chaser_kinds for threat in threats):
+        return GameStatus.DRAW
+
+    # Article 20.3 penalizes multiple non-General/non-Pawn pieces chasing one target.
+    if len(chaser_ids) > 1:
+        return GameStatus.PERPETUAL_CHASE_LOSS
+    return GameStatus.PERPETUAL_CHASE_LOSS
+
+
+def _repetition_adjudication(
+    state: XiangqiState,
+) -> tuple[GameStatus, Side | None] | None:
+    occurrences = [
+        index
+        for index, position in enumerate(state.position_history)
+        if position == state.position_key
+    ]
+    if len(occurrences) < REPETITION_ADJUDICATION_OCCURRENCES:
+        return None
+
+    cycle_start, cycle_end = occurrences[-3], occurrences[-1]
+    records = state.move_history[cycle_start:cycle_end]
+    if len(records) != cycle_end - cycle_start or not records:
+        if len(occurrences) >= REPETITION_DRAW_OCCURRENCES:
+            return GameStatus.DRAW, None
+        return None
+
+    perpetual_checkers = {
+        side
+        for side in Side
+        if (side_records := [record for record in records if record.mover is side])
+        and all(record.gives_check for record in side_records)
+    }
+    if len(perpetual_checkers) == 2:
+        return GameStatus.DRAW, None
+    if len(perpetual_checkers) == 1:
+        return GameStatus.PERPETUAL_CHECK_LOSS, next(iter(perpetual_checkers))
+
+    chase_rulings = {
+        side: _perpetual_chase_ruling(records, side)
+        for side in Side
+    }
+    chase_losses = [
+        side
+        for side, ruling in chase_rulings.items()
+        if ruling is GameStatus.PERPETUAL_CHASE_LOSS
+    ]
+    chase_draws = any(ruling is GameStatus.DRAW for ruling in chase_rulings.values())
+    if chase_draws or len(chase_losses) == 2:
+        return GameStatus.DRAW, None
+    if chase_losses:
+        return GameStatus.PERPETUAL_CHASE_LOSS, chase_losses[0]
+
+    if len(occurrences) >= REPETITION_DRAW_OCCURRENCES:
+        return GameStatus.DRAW, None
+    return None
+
+
+def _has_only_generals(state: XiangqiState) -> bool:
     return all(
         piece is None or piece.kind is PieceKind.GENERAL
         for row in state.board
@@ -472,12 +756,44 @@ def is_draw(state: XiangqiState) -> bool:
     )
 
 
+def _natural_move_draw(state: XiangqiState) -> bool:
+    return all(count >= NATURAL_MOVE_LIMIT_PER_SIDE for count in state.natural_move_counts)
+
+
+def is_draw(state: XiangqiState) -> bool:
+    """Detect WXF repetition rulings and automatic natural-movecount draws."""
+    if not legal_moves(state):
+        return False
+    if _has_only_generals(state) or _natural_move_draw(state):
+        return True
+    adjudication = _repetition_adjudication(state)
+    if adjudication is not None and adjudication[0] is GameStatus.DRAW:
+        return True
+    return False
+
+
 def game_status(state: XiangqiState) -> GameStatus:
     moves = legal_moves(state)
     if not moves:
         return GameStatus.CHECKMATE if is_in_check(state) else GameStatus.STALEMATE
-    if is_draw(state):
+
+    adjudication = _repetition_adjudication(state)
+    if adjudication is not None:
+        return adjudication[0]
+    if _has_only_generals(state) or _natural_move_draw(state):
         return GameStatus.DRAW
     if is_in_check(state):
         return GameStatus.CHECK
     return GameStatus.ACTIVE
+
+
+def game_winner(state: XiangqiState) -> Side | None:
+    """Return the winner for a terminal loss, or ``None`` while active/drawn."""
+    status = game_status(state)
+    if status in {GameStatus.CHECKMATE, GameStatus.STALEMATE}:
+        return state.turn.opponent
+    if status in {GameStatus.PERPETUAL_CHECK_LOSS, GameStatus.PERPETUAL_CHASE_LOSS}:
+        adjudication = _repetition_adjudication(state)
+        if adjudication is not None and adjudication[1] is not None:
+            return adjudication[1].opponent
+    return None
