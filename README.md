@@ -27,6 +27,18 @@ To run the automated backend tests, install `requirements-dev.txt` and run
 The API uses SQLite by default and creates `co_tuong.db` when it starts. Open
 <http://127.0.0.1:8000/docs> to try the endpoints.
 
+`GET /api/health` checks the database, Redis, and the WebSocket event bridge.
+It returns HTTP 200 when all checks are healthy and HTTP 503 with per-service
+status otherwise. Application, WebSocket, and Uvicorn logs are JSON lines on
+stdout; set `LOG_LEVEL` to change the minimum log level.
+
+For production-style multi-worker runs, keep Redis available and start, for
+example, `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4`. This
+project uses native FastAPI WebSockets, so Redis Pub/Sub relays lobby and room
+events between workers while the existing WebSocket protocol stays unchanged.
+SQLite is the local development default; production workers should use a
+shared database through `DATABASE_URL`.
+
 ## Xiangqi board rules
 
 The pure-Python rules engine is in `app/xiangqi.py`. It models a 9×10 board;
@@ -246,8 +258,7 @@ Clients can subscribe to `ws://127.0.0.1:8000/api/v1/rooms/ws` for public lobby
 events, and `ws://127.0.0.1:8000/api/v1/rooms/{room_id}/ws?participant_token=...`
 for room events. The lobby socket sends an initial `rooms.snapshot` containing
 waiting rooms, then lifecycle events such as `room.created`, `room.updated`,
-and `room.removed`.
-The WebSocket fan-out is in-process, so run one Uvicorn worker for this version.
+and `room.removed`. Redis Pub/Sub relays those events across Uvicorn workers.
 
 ## SMTP setup
 
