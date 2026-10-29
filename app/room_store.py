@@ -105,6 +105,7 @@ def create_room(name: str) -> tuple[dict[str, Any], str]:
     """Create a public waiting room and assign its creator to player slot one."""
     room_id = int(redis_client.incr(ROOM_SEQUENCE_KEY))
     host_token = secrets.token_urlsafe(32)
+    invite_token = secrets.token_urlsafe(32)
     created_at = int(time.time())
 
     pipeline = redis_client.pipeline(transaction=True)
@@ -116,6 +117,7 @@ def create_room(name: str) -> tuple[dict[str, Any], str]:
             "visibility": "public",
             "status": "waiting",
             "host_token": host_token,
+            "invite_token": invite_token,
             "player2_token": "",
             "player2_connected": "true",
             "created_at": created_at,
@@ -129,6 +131,33 @@ def create_room(name: str) -> tuple[dict[str, Any], str]:
     if room is None:
         raise RuntimeError("Room creation did not produce a readable room")
     return room, host_token
+
+
+def get_or_create_invite_token(room_id: int) -> str | None:
+    """Return the room's share token, adding one for rooms created by older code."""
+    room_key = _room_key(room_id)
+    if not redis_client.exists(room_key):
+        return None
+
+    invite_token = redis_client.hget(room_key, "invite_token")
+    if invite_token:
+        return str(invite_token)
+
+    candidate = secrets.token_urlsafe(32)
+    if redis_client.hsetnx(room_key, "invite_token", candidate):
+        return candidate
+
+    invite_token = redis_client.hget(room_key, "invite_token")
+    return str(invite_token) if invite_token else None
+
+
+def is_valid_invite_token(room_id: int, invite_token: str) -> bool:
+    """Validate a room-level share token without exposing it in room summaries."""
+    stored_token = get_or_create_invite_token(room_id)
+    return bool(
+        stored_token
+        and secrets.compare_digest(stored_token, invite_token)
+    )
 
 
 def get_room(room_id: int) -> dict[str, Any] | None:
