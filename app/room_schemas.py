@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class RoomCreateRequest(BaseModel):
@@ -10,6 +10,7 @@ class RoomCreateRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=80, examples=["Ván cờ cuối tuần"])
     host_name: str = Field(default="Khách", min_length=1, max_length=80, examples=["Minh Anh"])
+    timer_seconds: Literal[15, 30, 60] = 30
 
     @field_validator("name")
     @classmethod
@@ -60,10 +61,36 @@ class RoomSummary(BaseModel):
     name: str
     host_name: str
     visibility: Literal["public"]
-    status: Literal["waiting", "playing"]
+    status: Literal["waiting", "playing", "finished"]
     player_count: int
     spectator_count: int
     created_at: int
+    timer_seconds: Literal[15, 30, 60]
+
+
+class RoomGameSnapshot(BaseModel):
+    """Authoritative board and clock values for a started room."""
+
+    room_id: int
+    fen: str
+    version: int
+    side_to_move: Literal["w", "b"]
+    red_time_ms: int
+    black_time_ms: int
+    timer_seconds: Literal[15, 30, 60]
+    status: Literal["playing", "finished"]
+    result: str | None = None
+    winner: Literal["w", "b"] | None = None
+    server_time_ms: int
+
+
+class RoomMoveRequest(BaseModel):
+    """Client move coordinates; all legality is checked on the server."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    from_square: tuple[int, int] = Field(alias="from")
+    to_square: tuple[int, int] = Field(alias="to")
 
 
 class RoomAccessResponse(RoomSummary):
