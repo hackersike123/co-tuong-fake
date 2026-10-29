@@ -17,6 +17,13 @@ class RegisterRequest(BaseModel):
 
     display_name: str = Field(min_length=1, max_length=80, examples=["Red General"])
     email: EmailStr
+    username: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=32,
+        pattern=r"^[a-zA-Z0-9_.-]+$",
+        examples=["red_general"],
+    )
     password: str = Field(min_length=8, max_length=128, repr=False)
 
     @field_validator("display_name")
@@ -27,12 +34,43 @@ class RegisterRequest(BaseModel):
             raise ValueError("Display name cannot be blank")
         return display_name
 
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        username = value.strip().lower()
+        if not username:
+            raise ValueError("Username cannot be blank")
+        return username
+
 
 class VerifyEmailRequest(BaseModel):
     """Email and one-time code used to activate an account."""
 
     email: EmailStr
     otp: str = Field(pattern=r"^[0-9]{6}$", examples=["042781"])
+
+
+class LoginRequest(BaseModel):
+    """Credentials for email- or username-based sign-in."""
+
+    identifier: str = Field(min_length=1, max_length=254, examples=["player@example.com"])
+    password: str = Field(min_length=1, max_length=128, repr=False)
+    remember_me: bool = False
+
+    @field_validator("identifier")
+    @classmethod
+    def strip_identifier(cls, value: str) -> str:
+        return value.strip()
+
+
+class TokenResponse(BaseModel):
+    """Short-lived access token returned after login or refresh."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -70,5 +108,6 @@ class UserResponse(BaseModel):
     id: int
     display_name: str
     email: EmailStr
+    username: str | None = None
     is_active: bool
     created_at: datetime

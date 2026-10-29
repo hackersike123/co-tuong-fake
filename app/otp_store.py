@@ -51,12 +51,12 @@ def _attempts_key(user_id: int) -> str:
     return f"email-otp-attempts:{user_id}"
 
 
-def _password_reset_otp_key(user_id: int) -> str:
-    return f"password-reset-otp:{user_id}"
+def _password_reset_otp_key(email: str) -> str:
+    return f"forgot_pwd:{email.strip().lower()}"
 
 
-def _password_reset_attempts_key(user_id: int) -> str:
-    return f"password-reset-otp-attempts:{user_id}"
+def _password_reset_attempts_key(email: str) -> str:
+    return f"forgot_pwd_attempts:{email.strip().lower()}"
 
 
 def _issue_otp(code_key: str, attempts_key: str) -> str:
@@ -101,27 +101,27 @@ def clear_email_otp(user_id: int) -> None:
     redis_client.delete(_otp_key(user_id), _attempts_key(user_id))
 
 
-def issue_password_reset_otp(user_id: int) -> str:
+def issue_password_reset_otp(email: str) -> str:
     """Create a cryptographically random password-reset OTP with a 5-minute TTL."""
     return _issue_otp(
-        _password_reset_otp_key(user_id),
-        _password_reset_attempts_key(user_id),
+        _password_reset_otp_key(email),
+        _password_reset_attempts_key(email),
     )
 
 
-def consume_password_reset_otp(user_id: int, otp: str) -> int:
+def consume_password_reset_otp(email: str, otp: str) -> int:
     """Check a reset code and atomically consume it if it matches."""
     return _check_otp(
-        _password_reset_otp_key(user_id),
-        _password_reset_attempts_key(user_id),
+        _password_reset_otp_key(email),
+        _password_reset_attempts_key(email),
         otp,
         consume=True,
     )
 
 
-def clear_password_reset_otp(user_id: int) -> None:
+def clear_password_reset_otp(email: str) -> None:
     """Remove the password-reset code and its attempt counter."""
     redis_client.delete(
-        _password_reset_otp_key(user_id),
-        _password_reset_attempts_key(user_id),
+        _password_reset_otp_key(email),
+        _password_reset_attempts_key(email),
     )
