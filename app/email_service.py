@@ -1,4 +1,4 @@
-"""Send account verification codes through an SMTP provider."""
+"""Send account and room invitation emails through an SMTP provider."""
 
 import smtplib
 import ssl
@@ -23,7 +23,7 @@ class EmailConfigurationError(RuntimeError):
 
 
 class EmailDeliveryError(RuntimeError):
-    """Raised when the SMTP server cannot accept a verification message."""
+    """Raised when the SMTP server cannot accept a message."""
 
 
 def ensure_email_configured() -> None:
@@ -62,8 +62,32 @@ def send_password_reset_email(recipient: str, otp: str) -> None:
     )
 
 
+def send_room_invitation_email(
+    recipient: str,
+    room_name: str,
+    room_code: str,
+    join_url: str,
+) -> None:
+    """Send a room code and direct invitation link to a friend."""
+    _send_email_message(
+        recipient=recipient,
+        subject="You are invited to a Co Tuong game",
+        body=(
+            f"You have been invited to join the room \"{room_name}\".\n\n"
+            f"Room code: {room_code}\n"
+            f"Join directly: {join_url}\n\n"
+            "If you were not expecting this invitation, you can ignore this email."
+        ),
+    )
+
+
 def _send_otp_email(recipient: str, otp: str, subject: str, body: str) -> None:
     """Send an OTP email through the configured SMTP settings."""
+    _send_email_message(recipient, subject, body)
+
+
+def _send_email_message(recipient: str, subject: str, body: str) -> None:
+    """Send a plain-text email through the configured SMTP settings."""
     ensure_email_configured()
 
     message = EmailMessage()

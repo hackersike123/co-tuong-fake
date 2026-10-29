@@ -182,10 +182,30 @@ app origin so generated invitation links point to the deployed app. Room
 actions still use this participant token; account login is not yet wired into
 room authorization.
 
+The `join_url` has the form `PUBLIC_APP_URL/room/{room_id}?token={invite_token}`.
+The invite token is separate from the host's participant token. The frontend can
+share or copy this URL with Web Share API / clipboard APIs. Set `PUBLIC_APP_URL`
+to a web app that handles `/room/{room_id}` and reads the `token` query value.
+
 Use `GET /api/v1/rooms/` to list public rooms waiting for an opponent. Join
 from the list or from a shared room link with `POST /api/v1/rooms/{room_id}/join`
-and `{}` as the body. The first joiner receives `player2`; later joiners are
+and `{}` as the body. For a direct link, send its `token` as `invite_token` in
+the join request. The first joiner receives `player2`; later joiners are
 spectators. Joining a room that has started is allowed only as a spectator.
+The public lobby can also join by numeric room code with
+`POST /api/v1/rooms/join` and `{"room_code":"42"}`.
+
+The host can email an invitation with `POST /api/v1/rooms/{room_id}/invite`:
+
+```json
+{
+  "email": "friend@example.com",
+  "participant_token": "<host participant token>"
+}
+```
+
+The API emails both the numeric room code and `join_url`; SMTP must be configured
+as described below. Only the room host can send email invitations.
 
 The host starts play with `POST /api/v1/rooms/{room_id}/start` and a body
 containing the host's `participant_token`. A second player must have joined.
