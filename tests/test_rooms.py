@@ -464,6 +464,202 @@ def test_host_websocket_disconnect_deletes_room(
     assert client.get(f"/api/v1/rooms/{room['id']}").status_code == 404
 
 
+def test_waiting_host_disconnect_notifies_players_and_spectators(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post("/api/v1/rooms/", json={"name": "Waiting disconnect"}).json()
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    spectator = client.post("/api/v1/rooms/1/join", json={}).json()
+
+    with client.websocket_connect("/api/v1/rooms/ws") as lobby_ws:
+        assert lobby_ws.receive_json()["type"] == "rooms.snapshot"
+        with client.websocket_connect(
+            f"/api/v1/rooms/1/ws?participant_token={opponent['participant_token']}"
+        ) as opponent_ws:
+            assert opponent_ws.receive_json()["type"] == "room.snapshot"
+            with client.websocket_connect(
+                f"/api/v1/rooms/1/ws?participant_token={spectator['participant_token']}"
+            ) as spectator_ws:
+                assert spectator_ws.receive_json()["type"] == "room.snapshot"
+                with client.websocket_connect(
+                    f"/api/v1/rooms/1/ws?participant_token={host['participant_token']}"
+                ) as host_ws:
+                    assert host_ws.receive_json()["type"] == "room.snapshot"
+
+                assert _receive_socket_event(lobby_ws, "room.removed")["reason"] == "host_left"
+                assert _receive_socket_event(opponent_ws, "room.closed")["room_id"] == 1
+                assert _receive_socket_event(spectator_ws, "room.closed")["room_id"] == 1
+
+    assert client.get("/api/v1/rooms/1").status_code == 404
+
+
+def test_disconnected_player_can_reconnect_and_resume_game_clock(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Reconnect test", "timer_seconds": 60},
+    ).json()
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+    host_url = f"/api/v1/rooms/1/ws?participant_token={host['participant_token']}"
+    opponent_url = f"/api/v1/rooms/1/ws?participant_token={opponent['participant_token']}"
+
+    with client.websocket_connect(host_url) as host_ws:
+        assert host_ws.receive_json()["type"] == "room.snapshot"
+        with client.websocket_connect(opponent_url) as opponent_ws:
+            assert opponent_ws.receive_json()["type"] == "room.snapshot"
+
+        disconnected = _receive_socket_event(host_ws, "player.disconnected")
+        assert disconnected["role"] == "player2"
+        assert disconnected["reconnect_seconds"] == 60
+        paused_game = client.get("/api/v1/rooms/1/game").json()
+        assert paused_game["paused"] is True
+        assert paused_game["disconnected_players"] == ["player2"]
+        host_ws.send_json({"type": "make_move", "from": [9, 1], "to": [7, 0]})
+        paused_move = _receive_socket_event(host_ws, "move_rejected")
+        assert paused_move["reason"] == "player_disconnected"
+
+        with client.websocket_connect(opponent_url) as reconnected_ws:
+            snapshot = reconnected_ws.receive_json()
+            assert snapshot["type"] == "room.snapshot"
+            assert snapshot["game"]["paused"] is False
+            assert snapshot["game"]["disconnected_players"] == []
+            assert _receive_socket_event(host_ws, "player.reconnected")["role"] == "player2"
+            assert _receive_socket_event(reconnected_ws, "player.reconnected")["role"] == "player2"
+
+            left = client.post(
+                "/api/v1/rooms/1/leave",
+                json={"participant_token": host["participant_token"]},
+            )
+            assert left.status_code == 200
+            assert _receive_socket_event(host_ws, "game.forfeit")["game"]["winner"] == "b"
+            assert _receive_socket_event(reconnected_ws, "game.forfeit")["game"]["winner"] == "b"
+            assert _receive_socket_event(host_ws, "room.closed")["reason"] == "host_forfeit"
+            assert _receive_socket_event(reconnected_ws, "room.closed")["reason"] == "host_forfeit"
+
+
+def test_one_of_multiple_host_sockets_dropping_does_not_start_reconnect_window(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Multiple sockets", "timer_seconds": 60},
+    ).json()
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+    host_url = f"/api/v1/rooms/1/ws?participant_token={host['participant_token']}"
+    opponent_url = f"/api/v1/rooms/1/ws?participant_token={opponent['participant_token']}"
+
+    with client.websocket_connect(opponent_url) as opponent_ws:
+        assert opponent_ws.receive_json()["type"] == "room.snapshot"
+        with client.websocket_connect(host_url) as second_host_ws:
+            assert second_host_ws.receive_json()["type"] == "room.snapshot"
+            with client.websocket_connect(host_url) as first_host_ws:
+                assert first_host_ws.receive_json()["type"] == "room.snapshot"
+
+            game = client.get("/api/v1/rooms/1/game").json()
+            assert game["paused"] is False
+            assert game["disconnected_players"] == []
+
+            response = client.post(
+                "/api/v1/rooms/1/leave",
+                json={"participant_token": host["participant_token"]},
+            )
+            assert response.status_code == 200
+            assert _receive_socket_event(second_host_ws, "game.forfeit")["game"]["winner"] == "b"
+            assert _receive_socket_event(opponent_ws, "game.forfeit")["game"]["winner"] == "b"
+
+
+def test_reconnect_timeout_forfeits_disconnected_player(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = rooms_client
+    monkeypatch.setattr(room_store, "RECONNECT_TIMEOUT_MS", 20)
+    host = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Reconnect timeout", "timer_seconds": 60},
+    ).json()
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/1/ws?participant_token={host['participant_token']}"
+    ) as host_ws:
+        assert host_ws.receive_json()["type"] == "room.snapshot"
+        with client.websocket_connect(
+            f"/api/v1/rooms/1/ws?participant_token={opponent['participant_token']}"
+        ) as opponent_ws:
+            assert opponent_ws.receive_json()["type"] == "room.snapshot"
+
+        disconnected = _receive_socket_event(host_ws, "player.disconnected")
+        assert disconnected["role"] == "player2"
+        result = _receive_socket_event(host_ws, "game.forfeit")
+        assert result["reason"] == "reconnect_timeout"
+        assert result["loser_role"] == "player2"
+        assert result["game"]["result"] == "forfeit"
+        assert result["game"]["winner"] == "w"
+        state = client.get("/api/v1/rooms/1/game").json()
+        assert state["status"] == "finished"
+        assert state["result"] == "forfeit"
+        assert state["winner"] == "w"
+
+
+def test_host_voluntary_exit_forfeits_then_deletes_playing_room(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Host forfeit", "timer_seconds": 60},
+    ).json()
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/1/ws?participant_token={host['participant_token']}"
+    ) as host_ws:
+        assert host_ws.receive_json()["type"] == "room.snapshot"
+        with client.websocket_connect(
+            f"/api/v1/rooms/1/ws?participant_token={opponent['participant_token']}"
+        ) as opponent_ws:
+            assert opponent_ws.receive_json()["type"] == "room.snapshot"
+            response = client.post(
+                "/api/v1/rooms/1/leave",
+                json={"participant_token": host["participant_token"]},
+            )
+            assert response.status_code == 200
+            assert response.json()["room_deleted"] is True
+
+            host_result = _receive_socket_event(host_ws, "game.forfeit")
+            opponent_result = _receive_socket_event(opponent_ws, "game.forfeit")
+            assert host_result == opponent_result
+            assert host_result["reason"] == "player_left"
+            assert host_result["loser_role"] == "player1"
+            assert host_result["game"]["result"] == "forfeit"
+            assert host_result["game"]["winner"] == "b"
+            assert _receive_socket_event(host_ws, "room.closed")["reason"] == "host_forfeit"
+            assert _receive_socket_event(opponent_ws, "room.closed")["reason"] == "host_forfeit"
+
+    assert client.get("/api/v1/rooms/1").status_code == 404
+
+
 def test_lobby_socket_snapshots_waiting_rooms_and_hides_started_rooms(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:
