@@ -415,15 +415,97 @@ def _generals_face_on_board(board: Board) -> bool:
 def _is_square_attacked_on_board(board: Board, square: Square, by_side: Side) -> bool:
     if not _inside(square):
         return False
+    target = board[square[0]][square[1]]
+    if target is not None and target.side is by_side:
+        return False
+
+    target_row, target_column = square
     for row_index, row in enumerate(board):
         for column_index, piece in enumerate(row):
             if piece is None or piece.side is not by_side:
                 continue
-            if square in _piece_destinations(board, (row_index, column_index), piece):
-                return True
 
-    target = board[square[0]][square[1]]
-    if target is not None and target.kind is PieceKind.GENERAL and target.side is not by_side:
+            row_delta = target_row - row_index
+            column_delta = target_column - column_index
+            absolute_row_delta = abs(row_delta)
+            absolute_column_delta = abs(column_delta)
+
+            if piece.kind is PieceKind.GENERAL:
+                if (
+                    absolute_row_delta + absolute_column_delta == 1
+                    and _inside_palace(piece.side, square)
+                ):
+                    return True
+                continue
+
+            if piece.kind is PieceKind.ADVISOR:
+                if (
+                    absolute_row_delta == 1
+                    and absolute_column_delta == 1
+                    and _inside_palace(piece.side, square)
+                ):
+                    return True
+                continue
+
+            if piece.kind is PieceKind.ELEPHANT:
+                if (
+                    absolute_row_delta == 2
+                    and absolute_column_delta == 2
+                    and _on_own_side_of_river(piece.side, target_row)
+                    and board[row_index + row_delta // 2][
+                        column_index + column_delta // 2
+                    ]
+                    is None
+                ):
+                    return True
+                continue
+
+            if piece.kind is PieceKind.HORSE:
+                if (absolute_row_delta, absolute_column_delta) not in {
+                    (2, 1),
+                    (1, 2),
+                }:
+                    continue
+                if absolute_row_delta == 2:
+                    leg = (row_index + row_delta // 2, column_index)
+                else:
+                    leg = (row_index, column_index + column_delta // 2)
+                if board[leg[0]][leg[1]] is None:
+                    return True
+                continue
+
+            if piece.kind in {PieceKind.ROOK, PieceKind.CANNON}:
+                if row_delta != 0 and column_delta != 0:
+                    continue
+                row_step = (row_delta > 0) - (row_delta < 0)
+                column_step = (column_delta > 0) - (column_delta < 0)
+                current_row = row_index + row_step
+                current_column = column_index + column_step
+                screens = 0
+                while (current_row, current_column) != square:
+                    if board[current_row][current_column] is not None:
+                        screens += 1
+                    current_row += row_step
+                    current_column += column_step
+
+                if piece.kind is PieceKind.ROOK and screens == 0:
+                    return True
+                if piece.kind is PieceKind.CANNON and (
+                    (screens == 0 and target is None)
+                    or (screens == 1 and target is not None)
+                ):
+                    return True
+                continue
+
+            if piece.kind is PieceKind.PAWN:
+                forward = -1 if piece.side is Side.RED else 1
+                if row_delta == forward and column_delta == 0:
+                    return True
+                crossed_river = row_index <= 4 if piece.side is Side.RED else row_index >= 5
+                if crossed_river and row_delta == 0 and absolute_column_delta == 1:
+                    return True
+
+    if target is not None and target.kind is PieceKind.GENERAL:
         return _generals_face_on_board(board)
     return False
 

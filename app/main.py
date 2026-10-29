@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from .database import Base, engine, upgrade_sqlite_schema
 from .routers.auth import router as auth_router
+from .routers.pve import router as pve_router
 from .routers.rooms import router as rooms_router
 
 
@@ -21,6 +22,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Co Tuong API", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["accounts"])
 app.include_router(rooms_router, prefix="/api/v1/rooms", tags=["rooms"])
+app.include_router(pve_router, prefix="/api/v1/pve", tags=["single-player"])
 
 
 @app.get("/health", tags=["health"])

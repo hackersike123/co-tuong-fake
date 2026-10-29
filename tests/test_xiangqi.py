@@ -24,9 +24,11 @@ from app.xiangqi import (
     is_checkmate,
     is_draw,
     is_in_check,
+    is_square_attacked,
     is_stalemate,
     legal_moves,
     legal_moves_from,
+    _piece_destinations,
 )
 
 
@@ -66,6 +68,53 @@ def make_state(
 
 def destinations(state: XiangqiState, origin: tuple[int, int]) -> set[tuple[int, int]]:
     return {move.destination for move in legal_moves_from(state, origin)}
+
+
+def _reference_is_square_attacked(
+    state: XiangqiState,
+    square: tuple[int, int],
+    by_side: Side,
+) -> bool:
+    for row_index, row in enumerate(state.board):
+        for column_index, piece in enumerate(row):
+            if piece is None or piece.side is not by_side:
+                continue
+            if square in _piece_destinations(state.board, (row_index, column_index), piece):
+                return True
+
+    target = state.board[square[0]][square[1]]
+    if target is not None and target.kind is PieceKind.GENERAL and target.side is not by_side:
+        return generals_face(state)
+    return False
+
+
+def test_fast_attack_detection_matches_move_generation() -> None:
+    states = [
+        XiangqiState.initial(),
+        make_state(
+            pieces=[
+                (Side.RED, PieceKind.CANNON, (4, 0)),
+                (Side.RED, PieceKind.PAWN, (4, 2)),
+                (Side.BLACK, PieceKind.PAWN, (4, 5)),
+                (Side.BLACK, PieceKind.HORSE, (2, 4)),
+                (Side.RED, PieceKind.ELEPHANT, (7, 2)),
+            ]
+        ),
+        make_state(
+            red_general=(9, 4),
+            black_general=(0, 4),
+            pieces=[(Side.RED, PieceKind.PAWN, (5, 4))],
+        ),
+    ]
+
+    for state in states:
+        for row in range(10):
+            for column in range(9):
+                square = (row, column)
+                for side in Side:
+                    assert is_square_attacked(state, square, side) == (
+                        _reference_is_square_attacked(state, square, side)
+                    )
 
 
 def test_initial_board_and_wxf_fen_round_trip() -> None:
