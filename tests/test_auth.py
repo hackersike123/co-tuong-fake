@@ -205,12 +205,46 @@ def test_login_supports_email_username_and_rotates_remembered_session(
     new_refresh_token = rotated_cookie["refresh_token"].value
     assert new_refresh_token != old_refresh_token
 
+    logout_response = client.post(
+        "/api/v1/auth/logout",
+        headers={"Cookie": f"refresh_token={new_refresh_token}"},
+    )
+    assert logout_response.status_code == 204
+    assert "max-age=0" in logout_response.headers["set-cookie"].lower()
+
     with test_session_factory() as session:
         sessions = session.scalars(select(UserSession).order_by(UserSession.id)).all()
         assert len(sessions) == 2
         assert sessions[0].revoked_at is not None
-        assert sessions[1].revoked_at is None
+        assert sessions[1].revoked_at is not None
         assert sessions[1].refresh_token_hash == security.hash_token(new_refresh_token)
+
+    revoked_refresh = client.post(
+        "/api/v1/auth/refresh",
+        headers={"Cookie": f"refresh_token={new_refresh_token}"},
+    )
+    assert revoked_refresh.status_code == 401
+
+    logout_response = client.post(
+        "/api/v1/auth/logout",
+        headers={"Cookie": f"refresh_token={new_refresh_token}"},
+    )
+    assert logout_response.status_code == 204
+    cleared_cookie = logout_response.headers["set-cookie"]
+    assert "refresh_token=\"\"" in cleared_cookie
+    assert "Max-Age=0" in cleared_cookie
+    assert "HttpOnly" in cleared_cookie
+    assert "Secure" in cleared_cookie
+
+    with test_session_factory() as session:
+        sessions = session.scalars(select(UserSession).order_by(UserSession.id)).all()
+        assert sessions[1].revoked_at is not None
+
+    replay_response = client.post(
+        "/api/v1/auth/refresh",
+        headers={"Cookie": f"refresh_token={new_refresh_token}"},
+    )
+    assert replay_response.status_code == 401
 
 
 def test_startup_migration_adds_username_without_deleting_existing_users() -> None:
