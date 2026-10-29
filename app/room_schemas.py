@@ -9,6 +9,7 @@ class RoomCreateRequest(BaseModel):
     """Input used to create a public waiting room."""
 
     name: str = Field(min_length=1, max_length=80, examples=["Ván cờ cuối tuần"])
+    host_name: str = Field(default="Khách", min_length=1, max_length=80, examples=["Minh Anh"])
 
     @field_validator("name")
     @classmethod
@@ -17,6 +18,14 @@ class RoomCreateRequest(BaseModel):
         if not name:
             raise ValueError("Room name cannot be blank")
         return name
+
+    @field_validator("host_name")
+    @classmethod
+    def trim_host_name(cls, value: str) -> str:
+        host_name = value.strip()
+        if not host_name:
+            raise ValueError("Host name cannot be blank")
+        return host_name
 
 
 class RoomJoinRequest(BaseModel):
@@ -49,6 +58,7 @@ class RoomSummary(BaseModel):
 
     id: int
     name: str
+    host_name: str
     visibility: Literal["public"]
     status: Literal["waiting", "playing"]
     player_count: int
