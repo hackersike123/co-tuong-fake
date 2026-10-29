@@ -27,6 +27,32 @@ To run the automated backend tests, install `requirements-dev.txt` and run
 The API uses SQLite by default and creates `co_tuong.db` when it starts. Open
 <http://127.0.0.1:8000/docs> to try the endpoints.
 
+## Xiangqi board rules
+
+The pure-Python rules engine is in `app/xiangqi.py`. It models a 9×10 board;
+squares are `(row, column)` pairs with row 0 at Black's back rank and column 0
+at the a-file. Use `XiangqiState.initial()`, `XiangqiState.from_fen()`, and
+`state.to_fen()` to create or serialize a position. FEN uses the six-field WXF
+layout (`-` for castling and en-passant fields), uppercase pieces for Red, and
+lowercase pieces for Black.
+
+Use `legal_moves()` or `legal_moves_from()` to generate moves,
+`apply_move()` to create the next state, and `game_status()` / `game_winner()`
+to determine the result. The engine handles palace/river limits, horse legs,
+elephant eyes, cannon screens, check evasion, and generals facing on an open
+file. Stalemate is a loss in Xiangqi.
+
+Tournament history tracks repetition, perpetual checks, basic perpetual
+chases, and WXF natural-movecount progress. A perpetual checker loses after a
+threefold cycle unless both sides check, which is a draw. An unbroken fourfold
+position repetition draws. Natural movecount draws after each side has 100
+counted moves without a capture; no more than ten checking moves per side count
+toward that limit. Bare generals also draw. The six-field FEN does not contain
+the move sequence or natural-movecount metadata, so persist those state fields
+alongside FEN when saving an in-progress tournament game. Complex mixed
+mating-threat repetitions and perpetual block/offer/exchange adjudication still
+require explicit handling.
+
 ## Register an account
 
 `POST /api/v1/auth/register`
