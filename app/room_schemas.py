@@ -81,6 +81,11 @@ class RoomGameSnapshot(BaseModel):
     status: Literal["playing", "finished"]
     result: str | None = None
     winner: Literal["w", "b"] | None = None
+    paused: bool = False
+    disconnected_players: list[Literal["player1", "player2"]] = Field(default_factory=list)
+    reconnect_deadlines_ms: dict[Literal["player1", "player2"], int] = Field(
+        default_factory=dict
+    )
     server_time_ms: int
 
 

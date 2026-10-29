@@ -40,6 +40,8 @@ from ..room_store import (
     join_room,
     leave_room,
     list_public_rooms,
+    mark_player_disconnected,
+    mark_player_reconnected,
     start_room,
 )
 from ..settings import PUBLIC_APP_URL
@@ -128,6 +130,12 @@ def _process_room_move(
         return {"type": "move_rejected", "reason": "game_service_unavailable"}
     if snapshot is None or snapshot["status"] != "playing":
         return {"type": "move_rejected", "reason": "game_not_playing"}
+    if snapshot["paused"]:
+        return {
+            "type": "move_rejected",
+            "reason": "player_disconnected",
+            "game": snapshot,
+        }
 
     moving_side = Side.RED if role == "player1" else Side.BLACK
     if snapshot["side_to_move"] != moving_side.value:
@@ -480,7 +488,7 @@ def leave_public_room(
     if result == -2:
         raise HTTPException(status_code=403, detail="The participant token is not valid for this room")
     if result == 2:
-        background_tasks.add_task(room_hub.stop_timer, room_id)
+        background_tasks.add_task(room_hub.stop_room_timers, room_id)
         background_tasks.add_task(
             room_hub.broadcast_lobby,
             {"type": "room.removed", "room_id": room_id, "reason": "host_left"},
@@ -491,6 +499,34 @@ def leave_public_room(
             {"type": "room.closed", "room_id": room_id},
         )
         return RoomLeaveResponse(message="Room deleted", room_deleted=True)
+
+    if result in {4, 5}:
+        try:
+            game = get_game_snapshot(room_id)
+        except RedisError as exc:
+            logger.exception("Could not read forfeited game %s", room_id)
+            raise _service_unavailable() from exc
+        if game is None:
+            raise _room_not_found()
+        loser_role = "player1" if result == 4 else "player2"
+        event = {
+            "type": "game.forfeit",
+            "room_id": room_id,
+            "reason": "player_left",
+            "loser_role": loser_role,
+            "game": game,
+        }
+        if result == 4:
+            background_tasks.add_task(room_hub.close_after_forfeit, room_id, event)
+            return RoomLeaveResponse(
+                message="Host forfeited; room closed",
+                room_deleted=True,
+            )
+        background_tasks.add_task(room_hub.publish_forfeit, room_id, event)
+        return RoomLeaveResponse(
+            message="Player forfeited; game finished",
+            room_deleted=False,
+        )
 
     room = _room_summary(room_id)
     if room is not None:
@@ -504,8 +540,7 @@ def leave_public_room(
                 room_hub.broadcast_lobby,
                 {"type": "room.updated", "room": room},
             )
-    message = "Player disconnected; their seat can reconnect" if result == 3 else "Left room"
-    return RoomLeaveResponse(message=message, room_deleted=False)
+    return RoomLeaveResponse(message="Left room", room_deleted=False)
 
 
 @router.websocket("/ws")
@@ -514,11 +549,12 @@ async def public_lobby_socket(websocket: WebSocket) -> None:
     await room_hub.connect_lobby(websocket)
     try:
         rooms = await run_in_threadpool(list_public_rooms)
-        await websocket.send_json({"type": "rooms.snapshot", "rooms": rooms})
+        await room_hub.send_to_client(websocket, {"type": "rooms.snapshot", "rooms": rooms})
+        await room_hub.start_sender(websocket)
         while True:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
+                await room_hub.send_to_client(websocket, {"type": "pong"})
     except WebSocketDisconnect:
         pass
     except RedisError:
@@ -526,6 +562,79 @@ async def public_lobby_socket(websocket: WebSocket) -> None:
         await websocket.close(code=1011)
     finally:
         await room_hub.disconnect_lobby(websocket)
+
+
+async def _handle_room_socket_disconnect(room_id: int, participant_token: str) -> None:
+    """Apply host cleanup, waiting-seat removal, or reconnect grace after a drop."""
+    try:
+        result = await run_in_threadpool(
+            mark_player_disconnected,
+            room_id,
+            participant_token,
+        )
+    except RedisError:
+        logger.exception("Could not process room participant disconnect")
+        return
+
+    code = result["code"]
+    role = result["role"]
+    if code == 2:
+        await room_hub.stop_room_timers(room_id)
+        await room_hub.broadcast_lobby(
+            {"type": "room.removed", "room_id": room_id, "reason": "host_left"}
+        )
+        await room_hub.broadcast_room(
+            room_id,
+            {"type": "room.closed", "room_id": room_id},
+        )
+    elif code == 3:
+        # Freeze the per-turn broadcaster before notifying peers so a blocked
+        # timer tick cannot delay the disconnect event.
+        await room_hub.stop_timer(room_id)
+        await room_hub.schedule_reconnect_timeout(
+            room_id,
+            role,
+            result["deadline_ms"],
+            result["delay_ms"],
+        )
+        await room_hub.broadcast_room(
+            room_id,
+            {
+                "type": "player.disconnected",
+                "room_id": room_id,
+                "role": role,
+                "reconnect_deadline_ms": result["deadline_ms"],
+                "reconnect_seconds": 60,
+                "game_paused": True,
+            },
+        )
+    elif code == 4:
+        await room_hub.stop_room_timers(room_id)
+        try:
+            game = await run_in_threadpool(get_game_snapshot, room_id)
+        except RedisError:
+            logger.exception("Could not read timed-out game %s", room_id)
+            game = None
+        if game is not None:
+            await room_hub.broadcast_room(
+                room_id,
+                {"type": "game.timeout", "room_id": room_id, "game": game},
+            )
+    elif code == 1:
+        try:
+            updated_room = await run_in_threadpool(get_room, room_id)
+        except RedisError:
+            logger.exception("Could not read room %s after participant disconnect", room_id)
+            return
+        if updated_room is not None:
+            await room_hub.broadcast_room(
+                room_id,
+                {"type": "room.participant_left", "room": updated_room},
+            )
+            if updated_room["status"] == "waiting":
+                await room_hub.broadcast_lobby(
+                    {"type": "room.updated", "room": updated_room}
+                )
 
 
 @router.websocket("/{room_id}/ws")
@@ -548,20 +657,74 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
         await websocket.close(code=4404, reason="Room or participant token not found")
         return
 
-    await room_hub.connect_room(room_id, websocket)
+    reconnected = False
+    if role in {"player1", "player2"}:
+        try:
+            reconnect_result = await run_in_threadpool(
+                mark_player_reconnected,
+                room_id,
+                role,
+                participant_token,
+            )
+        except RedisError:
+            logger.exception("Could not restore room player connection for room %s", room_id)
+            await websocket.close(code=1011, reason="Room service is unavailable")
+            return
+        if reconnect_result in {-1, -2}:
+            await websocket.close(code=4404, reason="Room or participant token not found")
+            return
+        if reconnect_result == -4:
+            await websocket.close(code=4409, reason="Reconnect window expired")
+            return
+        if reconnect_result == -3:
+            try:
+                game = await run_in_threadpool(get_game_snapshot, room_id)
+            except RedisError:
+                logger.exception("Could not read expired reconnect game %s", room_id)
+                await websocket.close(code=1011, reason="Room service is unavailable")
+                return
+            await room_hub.publish_forfeit(
+                room_id,
+                {
+                    "type": "game.forfeit",
+                    "room_id": room_id,
+                    "reason": "reconnect_timeout",
+                    "loser_role": role,
+                    "game": game,
+                },
+            )
+            await websocket.close(code=4409, reason="Reconnect window expired")
+            return
+        reconnected = reconnect_result == 1
+        if reconnected:
+            await room_hub.stop_reconnect_timeout(room_id, role)
+
+    await room_hub.connect_room(room_id, websocket, participant_token)
     try:
         game = None
         if room["status"] in {"playing", "finished"}:
             game = await run_in_threadpool(get_game_snapshot, room_id)
         if room["status"] == "playing":
             await room_hub.ensure_timer(room_id)
-        await websocket.send_json(
-            {"type": "room.snapshot", "room": room, "role": role, "game": game}
+        await room_hub.send_to_client(
+            websocket,
+            {"type": "room.snapshot", "room": room, "role": role, "game": game},
         )
+        await room_hub.start_sender(websocket)
+        if reconnected:
+            await room_hub.broadcast_room(
+                room_id,
+                {
+                    "type": "player.reconnected",
+                    "room_id": room_id,
+                    "role": role,
+                    "game": game,
+                },
+            )
         while True:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
+                await room_hub.send_to_client(websocket, {"type": "pong"})
             elif isinstance(message, dict) and message.get("type") == "make_move":
                 event = await run_in_threadpool(
                     _process_room_move,
@@ -575,10 +738,11 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
                         await room_hub.stop_timer(room_id)
                     await room_hub.broadcast_room(room_id, event)
                 else:
-                    await websocket.send_json(event)
+                    await room_hub.send_to_client(websocket, event)
             else:
-                await websocket.send_json(
-                    {"type": "error", "reason": "unsupported_message"}
+                await room_hub.send_to_client(
+                    websocket,
+                    {"type": "error", "reason": "unsupported_message"},
                 )
     except WebSocketDisconnect:
         pass
@@ -586,28 +750,5 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
         logger.exception("Room WebSocket failed for room %s", room_id)
     finally:
         await room_hub.disconnect_room(room_id, websocket)
-        try:
-            result = await run_in_threadpool(leave_room, room_id, participant_token)
-        except RedisError:
-            logger.exception("Could not process room participant disconnect")
-        else:
-            if result == 2:
-                await room_hub.stop_timer(room_id)
-                await room_hub.broadcast_lobby(
-                    {"type": "room.removed", "room_id": room_id, "reason": "host_left"}
-                )
-                await room_hub.broadcast_room(
-                    room_id,
-                    {"type": "room.closed", "room_id": room_id},
-                )
-            elif result in (1, 3):
-                updated_room = await run_in_threadpool(get_room, room_id)
-                if updated_room is not None:
-                    await room_hub.broadcast_room(
-                        room_id,
-                        {"type": "room.participant_left", "room": updated_room},
-                    )
-                    if updated_room["status"] == "waiting":
-                        await room_hub.broadcast_lobby(
-                            {"type": "room.updated", "room": updated_room}
-                        )
+        if not await room_hub.has_participant_connection(room_id, participant_token):
+            await _handle_room_socket_disconnect(room_id, participant_token)

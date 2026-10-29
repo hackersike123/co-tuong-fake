@@ -54,9 +54,80 @@ def test_public_room_lifecycle_uses_configured_redis(
         assert room_store.get_room(room_id)["status"] == "playing"
 
         assert room_store.join_room(room_id, "late-spectator-token") == "spectator"
-        assert room_store.leave_room(room_id, host_token) == 2
+        assert room_store.leave_room(room_id, host_token) == 4
+        forfeited = room_store.get_game_snapshot(room_id)
+        assert forfeited is not None
+        assert forfeited["status"] == "finished"
+        assert forfeited["result"] == "forfeit"
+        assert forfeited["winner"] == "b"
+        assert room_store.delete_room(room_id)
         assert room_store.get_room(room_id) is None
         assert room_store.list_public_rooms() == []
+    finally:
+        for key in room_store.redis_client.scan_iter(match=f"{prefix}:*"):
+            room_store.redis_client.delete(key)
+
+
+def test_reconnect_grace_period_and_forfeit_use_redis_server_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        room_store.redis_client.ping()
+    except RedisError:
+        pytest.skip("Configured Redis server is unavailable")
+
+    namespace = uuid4().hex
+    prefix = f"test:room-reconnect:{namespace}"
+    monkeypatch.setattr(room_store, "PUBLIC_ROOMS_KEY", f"{prefix}:public")
+    monkeypatch.setattr(room_store, "ROOM_SEQUENCE_KEY", f"{prefix}:sequence")
+    monkeypatch.setattr(room_store, "_room_key", lambda room_id: f"{prefix}:room:{room_id}")
+    monkeypatch.setattr(
+        room_store,
+        "_participants_key",
+        lambda room_id: f"{prefix}:room:{room_id}:participants",
+    )
+    monkeypatch.setattr(
+        room_store,
+        "_spectators_key",
+        lambda room_id: f"{prefix}:room:{room_id}:spectators",
+    )
+
+    try:
+        room, host_token = room_store.create_room("Reconnect integration")
+        room_id = room["id"]
+        assert room_store.join_room(room_id, "opponent-token") == "player2"
+        assert room_store.start_room(room_id, host_token) == 1
+
+        dropped = room_store.mark_player_disconnected(room_id, host_token)
+        assert dropped["code"] == 3
+        assert dropped["role"] == "player1"
+        assert 0 < dropped["delay_ms"] <= room_store.RECONNECT_TIMEOUT_MS
+        paused = room_store.get_game_snapshot(room_id)
+        assert paused is not None
+        assert paused["paused"] is True
+        assert paused["disconnected_players"] == ["player1"]
+
+        redis_seconds, redis_microseconds = room_store.redis_client.time()
+        expired_deadline_ms = (
+            int(redis_seconds) * 1000 + int(redis_microseconds) // 1000 - 1
+        )
+        room_store.redis_client.hset(
+            room_store._room_key(room_id),
+            "player1_reconnect_deadline_ms",
+            expired_deadline_ms,
+        )
+        assert room_store.finalize_reconnect_forfeit(
+            room_id,
+            "player1",
+            expired_deadline_ms,
+        ) == 1
+
+        finished = room_store.get_game_snapshot(room_id)
+        assert finished is not None
+        assert finished["status"] == "finished"
+        assert finished["result"] == "forfeit"
+        assert finished["winner"] == "b"
+        assert room_store.mark_player_reconnected(room_id, "player1", host_token) == -4
     finally:
         for key in room_store.redis_client.scan_iter(match=f"{prefix}:*"):
             room_store.redis_client.delete(key)
