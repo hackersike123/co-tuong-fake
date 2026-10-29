@@ -34,11 +34,15 @@ def test_public_room_roles_start_and_host_deletion(
 ) -> None:
     client, _ = rooms_client
 
-    created = client.post("/api/v1/rooms/", json={"name": "  Weekend game  "})
+    created = client.post(
+        "/api/v1/rooms/",
+        json={"name": "  Weekend game  ", "host_name": "  Minh Anh  "},
+    )
     assert created.status_code == 201
     host = created.json()
     assert host["id"] == 1
     assert host["name"] == "Weekend game"
+    assert host["host_name"] == "Minh Anh"
     assert host["visibility"] == "public"
     assert host["status"] == "waiting"
     assert host["role"] == "player1"
@@ -107,6 +111,7 @@ def test_public_room_roles_start_and_host_deletion(
     next_room = client.post("/api/v1/rooms/", json={"name": "Next game"})
     assert next_room.status_code == 201
     assert next_room.json()["id"] == 2
+    assert next_room.json()["host_name"] == "Khách"
 
 
 def test_invitation_link_joins_each_friend_with_a_separate_token(
@@ -302,3 +307,40 @@ def test_host_websocket_disconnect_deletes_room(
         assert websocket.receive_json() == {"type": "pong"}
 
     assert client.get(f"/api/v1/rooms/{room['id']}").status_code == 404
+
+
+def test_lobby_socket_snapshots_waiting_rooms_and_hides_started_rooms(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    created = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Lobby test", "host_name": "Lobby Host"},
+    )
+    host = created.json()
+    client.post("/api/v1/rooms/1/join", json={})
+
+    with client.websocket_connect("/api/v1/rooms/ws") as websocket:
+        snapshot = websocket.receive_json()
+        assert snapshot["type"] == "rooms.snapshot"
+        assert len(snapshot["rooms"]) == 1
+        room = snapshot["rooms"][0]
+        assert room["id"] == 1
+        assert room["name"] == "Lobby test"
+        assert room["host_name"] == "Lobby Host"
+        assert room["status"] == "waiting"
+        assert room["player_count"] == 2
+        assert room["spectator_count"] == 0
+        assert isinstance(room["created_at"], int)
+
+        started = client.post(
+            "/api/v1/rooms/1/start",
+            json={"participant_token": host["participant_token"]},
+        )
+        assert started.status_code == 200
+        assert websocket.receive_json() == {
+            "type": "room.removed",
+            "room_id": 1,
+            "reason": "started",
+        }
+        assert client.get("/api/v1/rooms/").json() == []

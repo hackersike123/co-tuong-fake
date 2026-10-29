@@ -104,7 +104,7 @@ def create_public_room(
 ) -> RoomAccessResponse:
     """Create a public lobby room and assign its creator player one."""
     try:
-        room, host_token = create_room(payload.name)
+        room, host_token = create_room(payload.name, payload.host_name)
     except RedisError as exc:
         logger.exception("Could not create a room in Redis")
         raise _service_unavailable() from exc
