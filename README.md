@@ -171,7 +171,8 @@ Create a public room with `POST /api/v1/rooms/`:
 
 ```json
 {
-  "name": "Ván cờ cuối tuần"
+  "name": "Ván cờ cuối tuần",
+  "host_name": "Minh Anh"
 }
 ```
 
@@ -180,15 +181,17 @@ the creator's `player1` role, and a secret `participant_token`. Store the token
 privately; it authorizes room actions. Set `PUBLIC_APP_URL` to the public web
 app origin so generated invitation links point to the deployed app. Room
 actions still use this participant token; account login is not yet wired into
-room authorization.
+room authorization. `host_name` is optional and defaults to `Khách`.
 
 The `join_url` has the form `PUBLIC_APP_URL/room/{room_id}?token={invite_token}`.
 The invite token is separate from the host's participant token. The frontend can
 share or copy this URL with Web Share API / clipboard APIs. Set `PUBLIC_APP_URL`
 to a web app that handles `/room/{room_id}` and reads the `token` query value.
 
-Use `GET /api/v1/rooms/` to list public rooms waiting for an opponent. Join
-from the list or from a shared room link with `POST /api/v1/rooms/{room_id}/join`
+Use `GET /api/v1/rooms/` to list only public rooms whose status is `waiting`.
+Each lobby row includes the room ID/code, name, host name, creation timestamp,
+player count, and spectator count. Join from the list or from a shared room link
+with `POST /api/v1/rooms/{room_id}/join`
 and `{}` as the body. For a direct link, send its `token` as `invite_token` in
 the join request. The first joiner receives `player2`; later joiners are
 spectators. Joining a room that has started is allowed only as a spectator.
@@ -209,14 +212,16 @@ as described below. Only the room host can send email invitations.
 
 The host starts play with `POST /api/v1/rooms/{room_id}/start` and a body
 containing the host's `participant_token`. A second player must have joined.
-Starting removes the room from the public list, but its share link remains
+Starting changes status to `playing`, removes the room from the public lobby,
+and broadcasts `room.removed` to lobby WebSocket clients. Its share link remains
 usable for spectators. `POST /api/v1/rooms/{room_id}/leave` with a participant
 token leaves the room; when the host leaves, the room is deleted permanently.
 
 Clients can subscribe to `ws://127.0.0.1:8000/api/v1/rooms/ws` for public lobby
 events, and `ws://127.0.0.1:8000/api/v1/rooms/{room_id}/ws?participant_token=...`
-for room events. The WebSocket API sends room snapshots and lifecycle events
-such as `room.created`, `room.updated`, `room.started`, and `room.closed`.
+for room events. The lobby socket sends an initial `rooms.snapshot` containing
+waiting rooms, then lifecycle events such as `room.created`, `room.updated`,
+and `room.removed`.
 The WebSocket fan-out is in-process, so run one Uvicorn worker for this version.
 
 ## SMTP setup
