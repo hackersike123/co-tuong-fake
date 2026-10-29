@@ -547,6 +547,7 @@ def leave_public_room(
 async def public_lobby_socket(websocket: WebSocket) -> None:
     """Stream public lobby changes to connected clients."""
     await room_hub.connect_lobby(websocket)
+    logger.info("Lobby WebSocket connected", extra={"event": "websocket.lobby_connected"})
     try:
         rooms = await run_in_threadpool(list_public_rooms)
         await room_hub.send_to_client(websocket, {"type": "rooms.snapshot", "rooms": rooms})
@@ -562,6 +563,7 @@ async def public_lobby_socket(websocket: WebSocket) -> None:
         await websocket.close(code=1011)
     finally:
         await room_hub.disconnect_lobby(websocket)
+        logger.info("Lobby WebSocket disconnected", extra={"event": "websocket.lobby_disconnected"})
 
 
 async def _handle_room_socket_disconnect(room_id: int, participant_token: str) -> None:
@@ -578,6 +580,15 @@ async def _handle_room_socket_disconnect(room_id: int, participant_token: str) -
 
     code = result["code"]
     role = result["role"]
+    logger.info(
+        "Room WebSocket disconnected",
+        extra={
+            "event": "websocket.disconnected",
+            "room_id": room_id,
+            "role": role,
+            "outcome": code,
+        },
+    )
     if code == 2:
         await room_hub.stop_room_timers(room_id)
         await room_hub.broadcast_lobby(
@@ -642,6 +653,14 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
     """Stream room state and lifecycle events to participants."""
     participant_token = websocket.query_params.get("participant_token", "")
     if not participant_token:
+        logger.warning(
+            "Room WebSocket authentication failed",
+            extra={
+                "event": "websocket.auth_failed",
+                "room_id": room_id,
+                "reason": "missing_participant_token",
+            },
+        )
         await websocket.close(code=4401, reason="participant_token is required")
         return
 
@@ -649,11 +668,26 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
         role = await run_in_threadpool(get_participant_role, room_id, participant_token)
         room = await run_in_threadpool(get_room, room_id)
     except RedisError:
-        logger.exception("Could not validate room WebSocket credentials")
+        logger.exception(
+            "Could not validate room WebSocket credentials",
+            extra={
+                "event": "websocket.auth_validation_failed",
+                "room_id": room_id,
+                "reason": "redis_unavailable",
+            },
+        )
         await websocket.close(code=1011, reason="Room service is unavailable")
         return
 
     if room is None or role is None:
+        logger.warning(
+            "Room WebSocket authentication failed",
+            extra={
+                "event": "websocket.auth_failed",
+                "room_id": room_id,
+                "reason": "unknown_room_or_participant",
+            },
+        )
         await websocket.close(code=4404, reason="Room or participant token not found")
         return
 
@@ -674,9 +708,25 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             await websocket.close(code=4404, reason="Room or participant token not found")
             return
         if reconnect_result == -4:
+            logger.warning(
+                "Room WebSocket reconnect arrived after its deadline",
+                extra={
+                    "event": "websocket.reconnect_expired",
+                    "room_id": room_id,
+                    "role": role,
+                },
+            )
             await websocket.close(code=4409, reason="Reconnect window expired")
             return
         if reconnect_result == -3:
+            logger.warning(
+                "Room WebSocket reconnect arrived after its deadline",
+                extra={
+                    "event": "websocket.reconnect_expired",
+                    "room_id": room_id,
+                    "role": role,
+                },
+            )
             try:
                 game = await run_in_threadpool(get_game_snapshot, room_id)
             except RedisError:
@@ -700,6 +750,15 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             await room_hub.stop_reconnect_timeout(room_id, role)
 
     await room_hub.connect_room(room_id, websocket, participant_token)
+    logger.info(
+        "Room WebSocket connected",
+        extra={
+            "event": "websocket.connected",
+            "worker_id": room_hub.health_status()["worker_id"],
+            "room_id": room_id,
+            "role": role,
+        },
+    )
     try:
         game = None
         if room["status"] in {"playing", "finished"}:
@@ -747,7 +806,11 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
     except WebSocketDisconnect:
         pass
     except (RuntimeError, RedisError):
-        logger.exception("Room WebSocket failed for room %s", room_id)
+        logger.exception(
+            "Room WebSocket failed for room %s",
+            room_id,
+            extra={"event": "websocket.failed", "room_id": room_id, "role": role},
+        )
     finally:
         await room_hub.disconnect_room(room_id, websocket)
         if not await room_hub.has_participant_connection(room_id, participant_token):

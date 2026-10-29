@@ -20,6 +20,7 @@ redis_client = Redis.from_url(
 PUBLIC_ROOMS_KEY = "rooms:public"
 ROOM_SEQUENCE_KEY = "rooms:sequence"
 RECONNECT_TIMEOUT_MS = 60_000
+ROOM_TIMER_LEASE_MS = 3_000
 
 _JOIN_ROOM_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
@@ -390,6 +391,25 @@ redis.call('ZREM', KEYS[4], ARGV[1])
 return 1
 """
 
+_ACQUIRE_ROOM_TIMER_LEASE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0
+    or redis.call('HGET', KEYS[1], 'status') ~= 'playing'
+    or redis.call('HGET', KEYS[1], 'game_paused') == 'true' then
+    return -1
+end
+local owner = redis.call('GET', KEYS[2])
+if not owner or owner == ARGV[1] then
+    redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[2])
+    return 1
+end
+return 0
+"""
+
+_RELEASE_ROOM_TIMER_LEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+return redis.call('DEL', KEYS[1])
+"""
+
 
 def _room_key(room_id: int) -> str:
     return f"room:{room_id}"
@@ -401,6 +421,10 @@ def _participants_key(room_id: int) -> str:
 
 def _spectators_key(room_id: int) -> str:
     return f"room:{room_id}:spectators"
+
+
+def _timer_lease_key(room_id: int) -> str:
+    return f"{_room_key(room_id)}:timer-owner"
 
 
 def create_room(
@@ -728,5 +752,30 @@ def delete_room(room_id: int) -> bool:
             _spectators_key(room_id),
             PUBLIC_ROOMS_KEY,
             room_id,
+        )
+    )
+
+
+def acquire_room_timer_lease(room_id: int, worker_id: str) -> bool:
+    """Acquire or renew the single-worker lease for a room's timer broadcaster."""
+    result = redis_client.eval(
+        _ACQUIRE_ROOM_TIMER_LEASE_SCRIPT,
+        2,
+        _room_key(room_id),
+        _timer_lease_key(room_id),
+        worker_id,
+        ROOM_TIMER_LEASE_MS,
+    )
+    return result == 1
+
+
+def release_room_timer_lease(room_id: int, worker_id: str) -> bool:
+    """Release a timer lease only when the current worker owns it."""
+    return bool(
+        redis_client.eval(
+            _RELEASE_ROOM_TIMER_LEASE_SCRIPT,
+            1,
+            _timer_lease_key(room_id),
+            worker_id,
         )
     )

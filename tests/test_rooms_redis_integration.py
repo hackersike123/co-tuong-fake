@@ -133,6 +133,46 @@ def test_reconnect_grace_period_and_forfeit_use_redis_server_time(
             room_store.redis_client.delete(key)
 
 
+def test_timer_lease_allows_only_one_worker_to_broadcast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        room_store.redis_client.ping()
+    except RedisError:
+        pytest.skip("Configured Redis server is unavailable")
+
+    namespace = uuid4().hex
+    prefix = f"test:room-timer-lease:{namespace}"
+    monkeypatch.setattr(room_store, "PUBLIC_ROOMS_KEY", f"{prefix}:public")
+    monkeypatch.setattr(room_store, "ROOM_SEQUENCE_KEY", f"{prefix}:sequence")
+    monkeypatch.setattr(room_store, "_room_key", lambda room_id: f"{prefix}:room:{room_id}")
+    monkeypatch.setattr(
+        room_store,
+        "_participants_key",
+        lambda room_id: f"{prefix}:room:{room_id}:participants",
+    )
+    monkeypatch.setattr(
+        room_store,
+        "_spectators_key",
+        lambda room_id: f"{prefix}:room:{room_id}:spectators",
+    )
+
+    try:
+        room, host_token = room_store.create_room("Timer lease integration")
+        room_id = room["id"]
+        assert room_store.join_room(room_id, "opponent-token") == "player2"
+        assert room_store.start_room(room_id, host_token) == 1
+
+        assert room_store.acquire_room_timer_lease(room_id, "worker-a") is True
+        assert room_store.acquire_room_timer_lease(room_id, "worker-b") is False
+        assert room_store.release_room_timer_lease(room_id, "worker-b") is False
+        assert room_store.release_room_timer_lease(room_id, "worker-a") is True
+        assert room_store.acquire_room_timer_lease(room_id, "worker-b") is True
+    finally:
+        for key in room_store.redis_client.scan_iter(match=f"{prefix}:*"):
+            room_store.redis_client.delete(key)
+
+
 def test_live_game_moves_and_timeout_use_redis_server_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
