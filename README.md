@@ -87,6 +87,39 @@ Reset the password with `POST /api/v1/auth/reset-password`:
 The new password and confirmation must match and be 8–128 characters. A reset
 code can be used once; five wrong codes invalidate it.
 
+## Public rooms
+
+Create a public room with `POST /api/v1/rooms/`:
+
+```json
+{
+  "name": "Ván cờ cuối tuần"
+}
+```
+
+The response returns an auto-incremented room ID, a shareable `join_url`,
+the creator's `player1` role, and a secret `participant_token`. Store the token
+privately; it authorizes room actions. Set `PUBLIC_APP_URL` to the public web
+app origin so generated invitation links point to the deployed app. Until a
+login API is added, this token is the room's capability credential.
+
+Use `GET /api/v1/rooms/` to list public rooms waiting for an opponent. Join
+from the list or from a shared room link with `POST /api/v1/rooms/{room_id}/join`
+and `{}` as the body. The first joiner receives `player2`; later joiners are
+spectators. Joining a room that has started is allowed only as a spectator.
+
+The host starts play with `POST /api/v1/rooms/{room_id}/start` and a body
+containing the host's `participant_token`. A second player must have joined.
+Starting removes the room from the public list, but its share link remains
+usable for spectators. `POST /api/v1/rooms/{room_id}/leave` with a participant
+token leaves the room; when the host leaves, the room is deleted permanently.
+
+Clients can subscribe to `ws://127.0.0.1:8000/api/v1/rooms/ws` for public lobby
+events, and `ws://127.0.0.1:8000/api/v1/rooms/{room_id}/ws?participant_token=...`
+for room events. The WebSocket API sends room snapshots and lifecycle events
+such as `room.created`, `room.updated`, `room.started`, and `room.closed`.
+The WebSocket fan-out is in-process, so run one Uvicorn worker for this version.
+
 ## SMTP setup
 
 For Gmail, use `smtp.gmail.com:587` with STARTTLS and an App Password. Google
