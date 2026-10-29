@@ -37,10 +37,11 @@ layout (`-` for castling and en-passant fields), uppercase pieces for Red, and
 lowercase pieces for Black.
 
 Use `legal_moves()` or `legal_moves_from()` to generate moves,
-`apply_move()` to create the next state, and `game_status()` / `game_winner()`
-to determine the result. The engine handles palace/river limits, horse legs,
-elephant eyes, cannon screens, check evasion, and generals facing on an open
-file. Stalemate is a loss in Xiangqi.
+`make_move()` / `apply_move()` to create the next immutable state, and
+`undo_move()` to restore the complete previous state for search. Use
+`game_status()` / `game_winner()` to determine the result. The engine handles
+palace/river limits, horse legs, elephant eyes, cannon screens, check evasion,
+and generals facing on an open file. Stalemate is a loss in Xiangqi.
 
 Tournament history tracks repetition, perpetual checks, basic perpetual
 chases, and WXF natural-movecount progress. A perpetual checker loses after a

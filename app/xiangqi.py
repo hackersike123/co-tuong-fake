@@ -104,6 +104,10 @@ class MoveRecord:
     chased_targets: tuple[ChaseThreat, ...] = ()
     captured_piece_id: int | None = None
     chased_by: Side | None = None
+    captured_piece: Piece | None = None
+    previous_halfmove_clock: int | None = None
+    previous_natural_move_counts: tuple[int, int] | None = None
+    previous_natural_check_counts: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "mover", Side(self.mover))
@@ -868,6 +872,10 @@ def apply_move(state: XiangqiState, move: Move) -> XiangqiState:
             captured_piece.identity if captured_piece is not None else None
         ),
         chased_by=state.turn.opponent if chased_targets else None,
+        captured_piece=captured_piece,
+        previous_halfmove_clock=state.halfmove_clock,
+        previous_natural_move_counts=state.natural_move_counts,
+        previous_natural_check_counts=state.natural_check_counts,
     )
     return XiangqiState(
         board=next_board,
@@ -878,6 +886,54 @@ def apply_move(state: XiangqiState, move: Move) -> XiangqiState:
         natural_check_counts=natural_check_counts,
         position_history=state.position_history + (next_key,),
         move_history=state.move_history + (move_record,),
+    )
+
+
+def make_move(state: XiangqiState, move: Move) -> XiangqiState:
+    """Apply a legal move and return the resulting immutable game state."""
+    return apply_move(state, move)
+
+
+def undo_move(state: XiangqiState) -> XiangqiState:
+    """Return the state immediately before the most recently applied move."""
+    if not state.move_history:
+        raise ValueError("There is no move to undo")
+
+    record = state.move_history[-1]
+    if (
+        record.previous_halfmove_clock is None
+        or record.previous_natural_move_counts is None
+        or record.previous_natural_check_counts is None
+    ):
+        raise ValueError("The latest move record does not contain undo data")
+    if state.turn is not record.mover.opponent:
+        raise ValueError("The latest move record does not match the active side")
+
+    origin_row, origin_column = record.move.origin
+    target_row, target_column = record.move.destination
+    rows = [list(row) for row in state.board]
+    moved_piece = rows[target_row][target_column]
+    if moved_piece is None or moved_piece.identity != record.moved_piece_id:
+        raise ValueError("The latest move does not match the current board")
+    if rows[origin_row][origin_column] is not None:
+        raise ValueError("The move origin is occupied and cannot be restored")
+    captured_piece_id = (
+        record.captured_piece.identity if record.captured_piece is not None else None
+    )
+    if captured_piece_id != record.captured_piece_id:
+        raise ValueError("The captured piece does not match the move record")
+
+    rows[origin_row][origin_column] = moved_piece
+    rows[target_row][target_column] = record.captured_piece
+    return XiangqiState(
+        board=tuple(tuple(row) for row in rows),
+        turn=record.mover,
+        halfmove_clock=record.previous_halfmove_clock,
+        fullmove_number=state.fullmove_number - (record.mover is Side.BLACK),
+        natural_move_counts=record.previous_natural_move_counts,
+        natural_check_counts=record.previous_natural_check_counts,
+        position_history=state.position_history[:-1],
+        move_history=state.move_history[:-1],
     )
 
 
