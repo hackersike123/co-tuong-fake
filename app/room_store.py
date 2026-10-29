@@ -101,7 +101,7 @@ def _spectators_key(room_id: int) -> str:
     return f"room:{room_id}:spectators"
 
 
-def create_room(name: str) -> tuple[dict[str, Any], str]:
+def create_room(name: str, host_name: str = "Khách") -> tuple[dict[str, Any], str]:
     """Create a public waiting room and assign its creator to player slot one."""
     room_id = int(redis_client.incr(ROOM_SEQUENCE_KEY))
     host_token = secrets.token_urlsafe(32)
@@ -114,6 +114,7 @@ def create_room(name: str) -> tuple[dict[str, Any], str]:
         mapping={
             "id": room_id,
             "name": name,
+            "host_name": host_name,
             "visibility": "public",
             "status": "waiting",
             "host_token": host_token,
@@ -170,6 +171,7 @@ def get_room(room_id: int) -> dict[str, Any] | None:
     return {
         "id": int(values["id"]),
         "name": values["name"],
+        "host_name": values.get("host_name", "Khách"),
         "visibility": values["visibility"],
         "status": values["status"],
         "player_count": player_count,
