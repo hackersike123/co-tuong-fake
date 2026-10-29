@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect, status
+from pydantic import ValidationError
 from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
 
@@ -22,14 +23,18 @@ from ..room_schemas import (
     RoomCreateRequest,
     RoomInviteRequest,
     RoomInviteResponse,
+    RoomGameSnapshot,
     RoomJoinRequest,
     RoomLeaveResponse,
+    RoomMoveRequest,
     RoomSummary,
 )
 from ..room_store import (
     create_room,
+    apply_game_move,
     get_participant_role,
     get_room,
+    get_game_snapshot,
     get_or_create_invite_token,
     is_valid_invite_token,
     join_room,
@@ -38,6 +43,16 @@ from ..room_store import (
     start_room,
 )
 from ..settings import PUBLIC_APP_URL
+from ..xiangqi import (
+    GameStatus,
+    Move,
+    Side,
+    XiangqiState,
+    apply_move,
+    game_status,
+    game_winner,
+    legal_moves,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -92,6 +107,85 @@ def _room_summary(room_id: int) -> dict[str, Any] | None:
         raise _service_unavailable() from exc
 
 
+def _process_room_move(
+    room_id: int,
+    role: str,
+    message: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate, atomically store, and serialize one client-requested move."""
+    if role not in {"player1", "player2"}:
+        return {"type": "move_rejected", "reason": "spectators_cannot_move"}
+
+    try:
+        request = RoomMoveRequest.model_validate(message)
+    except ValidationError:
+        return {"type": "move_rejected", "reason": "invalid_move_payload"}
+
+    try:
+        snapshot = get_game_snapshot(room_id)
+    except RedisError as exc:
+        logger.exception("Could not load game state for room %s", room_id)
+        return {"type": "move_rejected", "reason": "game_service_unavailable"}
+    if snapshot is None or snapshot["status"] != "playing":
+        return {"type": "move_rejected", "reason": "game_not_playing"}
+
+    moving_side = Side.RED if role == "player1" else Side.BLACK
+    if snapshot["side_to_move"] != moving_side.value:
+        return {"type": "move_rejected", "reason": "not_your_turn", "game": snapshot}
+
+    try:
+        state = XiangqiState.from_fen(snapshot["fen"])
+        move = Move(request.from_square, request.to_square)
+    except ValueError:
+        logger.exception("Stored game state or move coordinates are invalid for room %s", room_id)
+        return {"type": "move_rejected", "reason": "invalid_move_payload"}
+
+    if move not in legal_moves(state):
+        return {"type": "move_rejected", "reason": "illegal_move", "game": snapshot}
+
+    next_state = apply_move(state, move)
+    status_after_move = game_status(next_state)
+    terminal = status_after_move not in {GameStatus.ACTIVE, GameStatus.CHECK}
+    winner = game_winner(next_state) if terminal else None
+    result = status_after_move.value if terminal else None
+
+    try:
+        update_result = apply_game_move(
+            room_id=room_id,
+            expected_version=snapshot["version"],
+            expected_fen=snapshot["fen"],
+            moving_side=moving_side.value,
+            next_side=next_state.turn.value,
+            next_fen=next_state.to_fen(),
+            result=result,
+            winner=winner.value if winner is not None else None,
+        )
+        latest_snapshot = get_game_snapshot(room_id)
+    except RedisError as exc:
+        logger.exception("Could not apply move for room %s", room_id)
+        return {"type": "move_rejected", "reason": "game_service_unavailable"}
+
+    if update_result == -3:
+        if latest_snapshot is None:
+            return {"type": "move_rejected", "reason": "game_not_playing"}
+        return {"type": "game.timeout", "room_id": room_id, "game": latest_snapshot}
+    if update_result == -2:
+        return {
+            "type": "move_rejected",
+            "reason": "stale_position",
+            "game": latest_snapshot,
+        }
+    if update_result != 1 or latest_snapshot is None:
+        return {"type": "move_rejected", "reason": "game_not_playing"}
+
+    return {
+        "type": "move_made",
+        "room_id": room_id,
+        "move": {"from": list(move.origin), "to": list(move.destination)},
+        "game": latest_snapshot,
+    }
+
+
 @router.post(
     "/",
     response_model=RoomAccessResponse,
@@ -104,7 +198,11 @@ def create_public_room(
 ) -> RoomAccessResponse:
     """Create a public lobby room and assign its creator player one."""
     try:
-        room, host_token = create_room(payload.name, payload.host_name)
+        room, host_token = create_room(
+            payload.name,
+            payload.host_name,
+            payload.timer_seconds,
+        )
     except RedisError as exc:
         logger.exception("Could not create a room in Redis")
         raise _service_unavailable() from exc
@@ -207,6 +305,28 @@ def get_room_details(room_id: int) -> RoomSummary:
     if room is None:
         raise _room_not_found()
     return RoomSummary(**room)
+
+
+@router.get(
+    "/{room_id}/game",
+    response_model=RoomGameSnapshot,
+    summary="Get the current server-authoritative board and clocks",
+)
+def get_room_game_state(room_id: int) -> RoomGameSnapshot:
+    """Return the current FEN, side to move, version, and remaining clocks."""
+    room = _room_summary(room_id)
+    if room is None:
+        raise _room_not_found()
+    if room["status"] == "waiting":
+        raise HTTPException(status_code=409, detail="The game has not started")
+    try:
+        game = get_game_snapshot(room_id)
+    except RedisError as exc:
+        logger.exception("Could not load game state for room %s", room_id)
+        raise _service_unavailable() from exc
+    if game is None:
+        raise HTTPException(status_code=409, detail="The game state is unavailable")
+    return RoomGameSnapshot(**game)
 
 
 @router.post(
@@ -317,6 +437,15 @@ def start_public_room(
     if room is None:
         raise _room_not_found()
 
+    try:
+        game = get_game_snapshot(room_id)
+    except RedisError as exc:
+        logger.exception("Could not load started game for room %s", room_id)
+        raise _service_unavailable() from exc
+    if game is None:
+        raise HTTPException(status_code=503, detail="The game state was not initialized")
+
+    background_tasks.add_task(room_hub.ensure_timer, room_id)
     background_tasks.add_task(
         room_hub.broadcast_lobby,
         {"type": "room.removed", "room_id": room_id, "reason": "started"},
@@ -324,7 +453,7 @@ def start_public_room(
     background_tasks.add_task(
         room_hub.broadcast_room,
         room_id,
-        {"type": "room.started", "room": room},
+        {"type": "room.started", "room": room, "game": game},
     )
     return RoomSummary(**room)
 
@@ -351,6 +480,7 @@ def leave_public_room(
     if result == -2:
         raise HTTPException(status_code=403, detail="The participant token is not valid for this room")
     if result == 2:
+        background_tasks.add_task(room_hub.stop_timer, room_id)
         background_tasks.add_task(
             room_hub.broadcast_lobby,
             {"type": "room.removed", "room_id": room_id, "reason": "host_left"},
@@ -420,11 +550,36 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
 
     await room_hub.connect_room(room_id, websocket)
     try:
-        await websocket.send_json({"type": "room.snapshot", "room": room, "role": role})
+        game = None
+        if room["status"] in {"playing", "finished"}:
+            game = await run_in_threadpool(get_game_snapshot, room_id)
+        if room["status"] == "playing":
+            await room_hub.ensure_timer(room_id)
+        await websocket.send_json(
+            {"type": "room.snapshot", "room": room, "role": role, "game": game}
+        )
         while True:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
+            elif isinstance(message, dict) and message.get("type") == "make_move":
+                event = await run_in_threadpool(
+                    _process_room_move,
+                    room_id,
+                    role,
+                    message,
+                )
+                if event["type"] in {"move_made", "game.timeout"}:
+                    game_state = event.get("game")
+                    if game_state is not None and game_state["status"] == "finished":
+                        await room_hub.stop_timer(room_id)
+                    await room_hub.broadcast_room(room_id, event)
+                else:
+                    await websocket.send_json(event)
+            else:
+                await websocket.send_json(
+                    {"type": "error", "reason": "unsupported_message"}
+                )
     except WebSocketDisconnect:
         pass
     except (RuntimeError, RedisError):
@@ -437,6 +592,7 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             logger.exception("Could not process room participant disconnect")
         else:
             if result == 2:
+                await room_hub.stop_timer(room_id)
                 await room_hub.broadcast_lobby(
                     {"type": "room.removed", "room_id": room_id, "reason": "host_left"}
                 )

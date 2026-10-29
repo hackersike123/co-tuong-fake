@@ -173,7 +173,8 @@ Create a public room with `POST /api/v1/rooms/`:
 ```json
 {
   "name": "Ván cờ cuối tuần",
-  "host_name": "Minh Anh"
+  "host_name": "Minh Anh",
+  "timer_seconds": 30
 }
 ```
 
@@ -183,6 +184,7 @@ privately; it authorizes room actions. Set `PUBLIC_APP_URL` to the public web
 app origin so generated invitation links point to the deployed app. Room
 actions still use this participant token; account login is not yet wired into
 room authorization. `host_name` is optional and defaults to `Khách`.
+`timer_seconds` accepts 15, 30, or 60; it sets each player's initial clock.
 
 The `join_url` has the form `PUBLIC_APP_URL/room/{room_id}?token={invite_token}`.
 The invite token is separate from the host's participant token. The frontend can
@@ -217,6 +219,15 @@ Starting changes status to `playing`, removes the room from the public lobby,
 and broadcasts `room.removed` to lobby WebSocket clients. Its share link remains
 usable for spectators. `POST /api/v1/rooms/{room_id}/leave` with a participant
 token leaves the room; when the host leaves, the room is deleted permanently.
+
+After start, `GET /api/v1/rooms/{room_id}/game` returns the authoritative FEN,
+move version, side to move, both remaining clocks in milliseconds, and server
+time. On the room WebSocket, a player sends a move as
+`{"type":"make_move","from":[9,1],"to":[7,0]}`. The server validates it
+against `legal_moves()` and broadcasts `move_made` with the updated game state.
+It rejects out-of-turn, spectator, stale, and illegal moves. The server charges
+the active side's clock and broadcasts `timer_tick` once per second. On expiry,
+the server broadcasts `game.timeout` and records the opponent as winner.
 
 Clients can subscribe to `ws://127.0.0.1:8000/api/v1/rooms/ws` for public lobby
 events, and `ws://127.0.0.1:8000/api/v1/rooms/{room_id}/ws?participant_token=...`

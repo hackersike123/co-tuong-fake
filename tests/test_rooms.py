@@ -1,6 +1,7 @@
 """Tests for Redis-backed public room lifecycle and participant roles."""
 
 from collections.abc import Iterator
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import fakeredis
@@ -12,6 +13,7 @@ from app import email_service, room_store
 from app.email_service import EmailConfigurationError, EmailDeliveryError
 from app.routers import rooms as room_routes
 from app.routers.rooms import router as rooms_router
+from app.xiangqi import STARTING_FEN
 
 
 @pytest.fixture
@@ -27,6 +29,159 @@ def rooms_client(
         yield client, fake_redis
 
     fake_redis.flushdb()
+
+
+def _receive_socket_event(websocket: Any, event_type: str) -> dict[str, Any]:
+    for _ in range(10):
+        event = websocket.receive_json()
+        if event.get("type") == event_type:
+            return event
+    raise AssertionError(f"Did not receive WebSocket event {event_type!r}")
+
+
+def test_start_initializes_server_authoritative_board_and_clocks(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    created = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Timed room", "timer_seconds": 15},
+    )
+    host = created.json()
+    client.post("/api/v1/rooms/1/join", json={})
+
+    started = client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+    snapshot = client.get("/api/v1/rooms/1/game")
+
+    assert started.status_code == 200
+    assert snapshot.status_code == 200
+    game = snapshot.json()
+    assert game["fen"] == STARTING_FEN
+    assert game["version"] == 0
+    assert game["side_to_move"] == "w"
+    assert 0 < game["red_time_ms"] <= 15_000
+    assert game["black_time_ms"] == 15_000
+    assert game["timer_seconds"] == 15
+    assert game["status"] == "playing"
+
+
+def test_make_move_is_server_validated_and_broadcast_to_room(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    created = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Move sync", "timer_seconds": 60},
+    )
+    host = created.json()
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+
+    red_ws_url = f"/api/v1/rooms/1/ws?participant_token={host['participant_token']}"
+    black_ws_url = f"/api/v1/rooms/1/ws?participant_token={opponent['participant_token']}"
+    with client.websocket_connect(red_ws_url) as red_ws:
+        with client.websocket_connect(black_ws_url) as black_ws:
+            red_snapshot = red_ws.receive_json()
+            black_snapshot = black_ws.receive_json()
+            assert red_snapshot["game"]["fen"] == STARTING_FEN
+            assert black_snapshot["game"]["status"] == "playing"
+
+            timer_event = _receive_socket_event(red_ws, "timer_tick")
+            assert timer_event["side_to_move"] == "w"
+            assert timer_event["red_time_ms"] <= 60_000
+
+            black_ws.send_json(
+                {"type": "make_move", "from": [0, 1], "to": [2, 0]}
+            )
+            rejected = _receive_socket_event(black_ws, "move_rejected")
+            assert rejected["type"] == "move_rejected"
+            assert rejected["reason"] == "not_your_turn"
+            assert rejected["game"]["side_to_move"] == "w"
+
+            red_ws.send_json(
+                {"type": "make_move", "from": [9, 1], "to": [9, 2]}
+            )
+            illegal = _receive_socket_event(red_ws, "move_rejected")
+            assert illegal["reason"] == "illegal_move"
+
+            red_ws.send_json(
+                {"type": "make_move", "from": [9, 1], "to": [7, 0]}
+            )
+            red_event = _receive_socket_event(red_ws, "move_made")
+            black_event = _receive_socket_event(black_ws, "move_made")
+            assert red_event["type"] == "move_made"
+            assert black_event == red_event
+            assert red_event["move"] == {"from": [9, 1], "to": [7, 0]}
+            assert red_event["game"]["side_to_move"] == "b"
+            assert red_event["game"]["version"] == 1
+            assert red_event["game"]["fen"] != STARTING_FEN
+
+
+def test_spectator_cannot_submit_a_move(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post("/api/v1/rooms/", json={"name": "Spectator move"}).json()
+    client.post("/api/v1/rooms/1/join", json={})
+    client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+    spectator = client.post("/api/v1/rooms/1/join", json={}).json()
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/1/ws?participant_token={spectator['participant_token']}"
+    ) as websocket:
+        assert websocket.receive_json()["role"] == "spectator"
+        websocket.send_json(
+            {"type": "make_move", "from": [9, 1], "to": [7, 0]}
+        )
+        rejected = _receive_socket_event(websocket, "move_rejected")
+
+    assert rejected == {
+        "type": "move_rejected",
+        "reason": "spectators_cannot_move",
+    }
+
+
+def test_authoritative_timer_finishes_game_when_active_clock_expires(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, fake_redis = rooms_client
+    created = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Timeout", "timer_seconds": 15},
+    )
+    host = created.json()
+    client.post("/api/v1/rooms/1/join", json={})
+    client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/1/ws?participant_token={host['participant_token']}"
+    ) as websocket:
+        assert websocket.receive_json()["game"]["status"] == "playing"
+        seconds, microseconds = fake_redis.time()
+        started_at_ms = int(seconds) * 1000 + int(microseconds) // 1000 - 16_000
+        fake_redis.hset("room:1", "turn_started_at_ms", started_at_ms)
+
+        timeout_event = _receive_socket_event(websocket, "game.timeout")
+        final_state = client.get("/api/v1/rooms/1/game")
+        assert final_state.status_code == 200
+        assert final_state.json()["result"] == "timeout"
+
+    assert timeout_event["game"]["status"] == "finished"
+    assert timeout_event["game"]["result"] == "timeout"
+    assert timeout_event["game"]["winner"] == "b"
+    assert timeout_event["game"]["red_time_ms"] == 0
 
 
 def test_public_room_roles_start_and_host_deletion(
