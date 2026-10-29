@@ -100,6 +100,12 @@ class MoveRecord:
     gives_check: bool
     chased_targets: tuple[ChaseThreat, ...] = ()
     captured_piece_id: int | None = None
+    chased_by: Side | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "mover", Side(self.mover))
+        if self.chased_by is not None:
+            object.__setattr__(self, "chased_by", Side(self.chased_by))
 
 
 @dataclass(frozen=True)
@@ -507,10 +513,43 @@ def _has_real_root(state: XiangqiState, capture_move: Move) -> bool:
     )
 
 
-def _collect_chase_threats(state: XiangqiState, chaser_side: Side) -> tuple[ChaseThreat, ...]:
+_PIECE_VALUES = {
+    PieceKind.GENERAL: 1000,
+    PieceKind.ROOK: 90,
+    PieceKind.CANNON: 45,
+    PieceKind.HORSE: 45,
+    PieceKind.ADVISOR: 20,
+    PieceKind.ELEPHANT: 20,
+    PieceKind.PAWN: 10,
+}
+
+
+def _is_protected_for_chase(state: XiangqiState, capture_move: Move) -> bool:
+    attacker = state.board[capture_move.origin[0]][capture_move.origin[1]]
+    target = state.board[capture_move.destination[0]][capture_move.destination[1]]
+    if attacker is None or target is None:
+        return False
+    # WXF treats a favorable capture of a more valuable piece as an exchange,
+    # even when that piece has a legal recapture.
+    if _PIECE_VALUES[target.kind] > _PIECE_VALUES[attacker.kind]:
+        return False
+    return _has_real_root(state, capture_move)
+
+
+def _find_piece_square(board: Board, identity: int) -> Square | None:
+    for row_index, row in enumerate(board):
+        for column_index, piece in enumerate(row):
+            if piece is not None and piece.identity == identity:
+                return row_index, column_index
+    return None
+
+
+def _collect_chase_candidates(
+    state: XiangqiState,
+    chaser_side: Side,
+) -> tuple[ChaseThreat, ...]:
     captures_by_target: dict[int, list[Move]] = {}
     target_pieces: dict[int, Piece] = {}
-    target_rows: dict[int, int] = {}
     for move in legal_moves(state, side=chaser_side):
         target_row, target_column = move.destination
         target = state.board[target_row][target_column]
@@ -518,37 +557,95 @@ def _collect_chase_threats(state: XiangqiState, chaser_side: Side) -> tuple[Chas
             continue
         if target.identity is None:
             continue
+        if target.kind is PieceKind.PAWN and not _pawn_has_crossed_river(
+            target, target_row
+        ):
+            continue
+        if _is_protected_for_chase(state, move):
+            continue
         captures_by_target.setdefault(target.identity, []).append(move)
         target_pieces[target.identity] = target
-        target_rows[target.identity] = target_row
 
-    threats: list[ChaseThreat] = []
+    candidates: list[ChaseThreat] = []
     for target_id, capture_moves in captures_by_target.items():
         target = target_pieces[target_id]
         chasers: dict[int, PieceKind] = {}
-        has_real_root = False
         for move in capture_moves:
             attacker = state.board[move.origin[0]][move.origin[1]]
             if attacker is None or attacker.identity is None:
                 continue
             chasers[attacker.identity] = attacker.kind
-            has_real_root = has_real_root or _has_real_root(state, move)
         if not chasers:
             continue
-        threats.append(
+        candidates.append(
             ChaseThreat(
                 target_id=target_id,
                 target_kind=target.kind,
-                target_is_unadvanced_pawn=(
-                    target.kind is PieceKind.PAWN
-                    and not _pawn_has_crossed_river(target, target_rows[target_id])
-                ),
+                target_is_unadvanced_pawn=False,
                 chaser_ids=tuple(sorted(chasers)),
                 chaser_kinds=tuple(chasers[chaser_id] for chaser_id in sorted(chasers)),
-                has_real_root=has_real_root,
+                has_real_root=False,
             )
         )
-    return tuple(threats)
+    return tuple(candidates)
+
+
+def _resolve_chase_candidates(
+    state: XiangqiState,
+    chaser_side: Side,
+    moved_piece_id: int,
+    candidates: tuple[ChaseThreat, ...],
+) -> tuple[ChaseThreat, ...]:
+    if not candidates or is_in_check(state, state.turn):
+        return ()
+
+    legal_capture_moves = legal_moves(state, side=chaser_side)
+    resolved: list[ChaseThreat] = []
+    for candidate in candidates:
+        target_square = _find_piece_square(state.board, candidate.target_id)
+        if target_square is None:
+            continue
+        target = state.board[target_square[0]][target_square[1]]
+        if target is None:
+            continue
+
+        surviving_chasers = {
+            identity: kind
+            for identity, kind in zip(candidate.chaser_ids, candidate.chaser_kinds)
+            if _find_piece_square(state.board, identity) is not None
+        }
+        if not surviving_chasers:
+            continue
+
+        capture_moves = [
+            move
+            for move in legal_capture_moves
+            if move.destination == target_square
+            and state.board[move.origin[0]][move.origin[1]] is not None
+            and state.board[move.origin[0]][move.origin[1]].identity
+            in surviving_chasers
+        ]
+        target_moved_away = moved_piece_id == candidate.target_id
+        real_root = any(_has_real_root(state, move) for move in capture_moves)
+        # Record only an effective response: the victim moved, or it acquired
+        # a legal recapture. A move that leaves an unprotected capture available
+        # is not a chase response under the WXF definition.
+        if not target_moved_away and not real_root:
+            continue
+
+        resolved.append(
+            ChaseThreat(
+                target_id=candidate.target_id,
+                target_kind=target.kind,
+                target_is_unadvanced_pawn=False,
+                chaser_ids=tuple(sorted(surviving_chasers)),
+                chaser_kinds=tuple(
+                    surviving_chasers[identity] for identity in sorted(surviving_chasers)
+                ),
+                has_real_root=real_root,
+            )
+        )
+    return tuple(resolved)
 
 
 def apply_move(state: XiangqiState, move: Move) -> XiangqiState:
@@ -562,6 +659,16 @@ def apply_move(state: XiangqiState, move: Move) -> XiangqiState:
     if moving_piece is None:  # The legal-move check above makes this defensive only.
         raise ValueError("The origin square is empty")
     captured_piece = state.board[target_row][target_column]
+    moved_piece_id = moving_piece.identity
+    if moved_piece_id is None:
+        raise ValueError("A piece on the board must have an identity")
+
+    irreversible_move = captured_piece is not None or moving_piece.kind is PieceKind.PAWN
+    chase_candidates = (
+        _collect_chase_candidates(state, state.turn.opponent)
+        if not irreversible_move and not is_in_check(state, state.turn)
+        else ()
+    )
 
     rows = [list(row) for row in state.board]
     rows[origin_row][origin_column] = None
@@ -598,18 +705,26 @@ def apply_move(state: XiangqiState, move: Move) -> XiangqiState:
         natural_move_counts = tuple(move_counts)
         natural_check_counts = tuple(check_counts)
 
-    moved_piece_id = moving_piece.identity
-    if moved_piece_id is None:
-        raise ValueError("A piece on the board must have an identity")
+    chased_targets = (
+        _resolve_chase_candidates(
+            provisional,
+            next_turn,
+            moved_piece_id,
+            chase_candidates,
+        )
+        if not irreversible_move and not gives_check
+        else ()
+    )
     move_record = MoveRecord(
         mover=state.turn,
         move=move,
         moved_piece_id=moved_piece_id,
         gives_check=gives_check,
-        chased_targets=_collect_chase_threats(provisional, state.turn),
+        chased_targets=chased_targets,
         captured_piece_id=(
             captured_piece.identity if captured_piece is not None else None
         ),
+        chased_by=state.turn.opponent if chased_targets else None,
     )
     return XiangqiState(
         board=next_board,
@@ -638,17 +753,27 @@ def _perpetual_chase_ruling(
     records: tuple[MoveRecord, ...],
     side: Side,
 ) -> GameStatus | None:
-    move_indexes = [index for index, record in enumerate(records) if record.mover is side]
-    if not move_indexes:
+    if any(record.mover is side and record.gives_check for record in records):
+        return None
+
+    response_indexes = [
+        index + 1
+        for index, record in enumerate(records)
+        if record.mover is side and index + 1 < len(records)
+    ]
+    if not response_indexes:
+        return None
+    response_records = [records[index] for index in response_indexes]
+    if any(record.chased_by is not side for record in response_records):
         return None
 
     chase_sets = [
         {
             threat.target_id
-            for threat in records[index].chased_targets
+            for threat in record.chased_targets
             if not threat.target_is_unadvanced_pawn
         }
-        for index in move_indexes
+        for record in response_records
     ]
     common_targets = set.intersection(*chase_sets) if chase_sets else set()
 
@@ -662,24 +787,16 @@ def _perpetual_chase_ruling(
 
     target_id = next(iter(common_targets))
     threats: list[ChaseThreat] = []
-    for index in move_indexes:
+    for record in response_records:
         threat = next(
             (
                 item
-                for item in records[index].chased_targets
+                for item in record.chased_targets
                 if item.target_id == target_id
             ),
             None,
         )
         if threat is None:
-            return None
-        response = records[(index + 1) % len(records)]
-        # WXF defines the response as moving the target away. Resolving it by
-        # capturing a chaser is also recognized when the capture is recorded.
-        if (
-            response.moved_piece_id != target_id
-            and response.captured_piece_id not in threat.chaser_ids
-        ):
             return None
         threats.append(threat)
 
