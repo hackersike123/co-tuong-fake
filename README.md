@@ -218,11 +218,24 @@ containing the host's `participant_token`. A second player must have joined.
 Starting changes status to `playing`, removes the room from the public lobby,
 and broadcasts `room.removed` to lobby WebSocket clients. Its share link remains
 usable for spectators. `POST /api/v1/rooms/{room_id}/leave` with a participant
-token leaves the room; when the host leaves, the room is deleted permanently.
+token records an intentional leave. If the host leaves while waiting, the room
+is deleted and `room.closed` is sent to its players and spectators. If a player
+leaves intentionally during a game, the server immediately records a forfeit;
+when the host forfeits, `game.forfeit` is broadcast before the room is deleted.
+The client should wait for the leave response before closing its WebSocket so
+the server can distinguish an intentional exit from a network drop.
+
+An unexpected WebSocket drop is handled separately. During a game, the server
+pauses the game clock and grants the disconnected player 60 seconds to reconnect
+to the same room WebSocket with the same `participant_token`. The room emits
+`player.disconnected` and `player.reconnected`; if the deadline expires, the
+server records a forfeit and emits `game.forfeit`. A host disconnect while the
+room is waiting still deletes the room and emits `room.closed`.
 
 After start, `GET /api/v1/rooms/{room_id}/game` returns the authoritative FEN,
 move version, side to move, both remaining clocks in milliseconds, and server
-time. On the room WebSocket, a player sends a move as
+time, plus `paused`, disconnected players, and their reconnect deadlines. On
+the room WebSocket, a player sends a move as
 `{"type":"make_move","from":[9,1],"to":[7,0]}`. The server validates it
 against `legal_moves()` and broadcasts `move_made` with the updated game state.
 It rejects out-of-turn, spectator, stale, and illegal moves. The server charges
