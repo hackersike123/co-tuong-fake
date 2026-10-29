@@ -53,6 +53,34 @@ alongside FEN when saving an in-progress tournament game. Complex mixed
 mating-threat repetitions and perpetual block/offer/exchange adjudication still
 require explicit handling.
 
+## Login and remembered sessions
+
+Set `JWT_SECRET` in `.env` to a random value containing at least 32 characters.
+The access JWT lasts 15 minutes by default; `ACCESS_TOKEN_MINUTES` can be set
+from 15 to 30 minutes.
+
+`POST /api/v1/auth/login` accepts an email or username:
+
+```json
+{
+  "identifier": "player@example.com",
+  "password": "secure-password",
+  "remember_me": true
+}
+```
+
+The response contains `access_token`, `token_type`, and `expires_in`. When
+`remember_me` is true, the API stores a hash of a random refresh token in
+`user_sessions` and sends the token only in an HttpOnly, Secure,
+SameSite=Lax cookie with a 30-day lifetime. `POST /api/v1/auth/refresh` rotates
+that cookie and returns a new access token. `POST /api/v1/auth/logout` revokes
+the current remembered session and clears the cookie. The Secure cookie is
+sent by browsers over HTTPS only.
+
+Registration accepts an optional unique `username`; existing accounts without
+one can continue signing in with their email. The startup migration adds the
+username column to an existing SQLite demo database without deleting accounts.
+
 ## Register an account
 
 `POST /api/v1/auth/register`
@@ -96,8 +124,9 @@ Request a reset code with `POST /api/v1/auth/forgot-password`:
 ```
 
 The API sends a six-digit code to an active account's email. The code is stored
-in Redis for 300 seconds. The response is the same whether the email exists or
-not.
+at `forgot_pwd:{email}` in Redis for 300 seconds. The reset endpoint verifies
+the code before changing the password. The response is the same whether the
+email exists or not.
 
 Reset the password with `POST /api/v1/auth/reset-password`:
 
@@ -126,8 +155,9 @@ Create a public room with `POST /api/v1/rooms/`:
 The response returns an auto-incremented room ID, a shareable `join_url`,
 the creator's `player1` role, and a secret `participant_token`. Store the token
 privately; it authorizes room actions. Set `PUBLIC_APP_URL` to the public web
-app origin so generated invitation links point to the deployed app. Until a
-login API is added, this token is the room's capability credential.
+app origin so generated invitation links point to the deployed app. Room
+actions still use this participant token; account login is not yet wired into
+room authorization.
 
 Use `GET /api/v1/rooms/` to list public rooms waiting for an opponent. Join
 from the list or from a shared room link with `POST /api/v1/rooms/{room_id}/join`

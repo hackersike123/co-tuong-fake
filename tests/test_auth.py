@@ -1,19 +1,22 @@
 """Tests for registration and OTP account activation."""
 
 from collections.abc import Iterator
+from datetime import datetime, timedelta, timezone
+from http.cookies import SimpleCookie
 
 import fakeredis
+import jwt
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pwdlib import PasswordHash
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import otp_store
-from app.database import Base, get_session
-from app.models import User
+from app import otp_store, security
+from app.database import Base, get_session, upgrade_sqlite_schema
+from app.models import User, UserSession
 from app.routers import auth as auth_routes
 
 
@@ -43,6 +46,11 @@ def api_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient, li
     fake_redis = fakeredis.FakeRedis(decode_responses=True)
     sent_emails: list[tuple[str, str]] = []
     monkeypatch.setattr(otp_store, "redis_client", fake_redis)
+    monkeypatch.setattr(
+        security,
+        "JWT_SECRET",
+        "test-only-jwt-secret-that-is-long-enough-1234567890",
+    )
     monkeypatch.setattr(auth_routes, "ensure_email_configured", lambda: None)
     monkeypatch.setattr(
         auth_routes,
@@ -110,6 +118,166 @@ def test_register_stores_inactive_account_and_verifies_email(
         assert PasswordHash.recommended().verify(password, user.password_hash)
 
 
+def test_login_supports_email_username_and_rotates_remembered_session(
+    api_client: tuple[TestClient, list[tuple[str, str]], fakeredis.FakeRedis, sessionmaker[Session]],
+) -> None:
+    client, sent_emails, _, test_session_factory = api_client
+    password = "test-password-123"
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "remember-player@example.com",
+            "username": "red_general",
+            "password": password,
+            "display_name": "Red General",
+        },
+    )
+    assert registration.status_code == 201
+    account = registration.json()
+    assert account["username"] == "red_general"
+
+    inactive_login = client.post(
+        "/api/v1/auth/login",
+        json={"identifier": account["email"], "password": password},
+    )
+    assert inactive_login.status_code == 401
+
+    verification = client.post(
+        "/api/v1/auth/verify-email",
+        json={"email": account["email"], "otp": sent_emails[0][1]},
+    )
+    assert verification.status_code == 200
+
+    email_login = client.post(
+        "/api/v1/auth/login",
+        json={"identifier": account["email"], "password": password},
+    )
+    assert email_login.status_code == 200
+    email_token = email_login.json()
+    claims = jwt.decode(
+        email_token["access_token"],
+        security.JWT_SECRET,
+        algorithms=["HS256"],
+    )
+    assert email_token["expires_in"] == 15 * 60
+    assert claims["sub"] == str(account["id"])
+    assert claims["exp"] - claims["iat"] == 15 * 60
+
+    bad_password_login = client.post(
+        "/api/v1/auth/login",
+        json={"identifier": account["email"], "password": "incorrect-password"},
+    )
+    assert bad_password_login.status_code == 401
+
+    with test_session_factory() as session:
+        assert session.scalars(select(UserSession)).all() == []
+
+    remembered_login = client.post(
+        "/api/v1/auth/login",
+        json={
+            "identifier": "RED_GENERAL",
+            "password": password,
+            "remember_me": True,
+        },
+    )
+    assert remembered_login.status_code == 200
+    set_cookie = remembered_login.headers["set-cookie"]
+    assert "HttpOnly" in set_cookie
+    assert "Secure" in set_cookie
+    assert "SameSite=lax" in set_cookie
+    assert "Max-Age=2592000" in set_cookie
+    cookie = SimpleCookie()
+    cookie.load(set_cookie)
+    old_refresh_token = cookie["refresh_token"].value
+
+    with test_session_factory() as session:
+        old_session = session.scalar(select(UserSession))
+        assert old_session is not None
+        assert old_session.refresh_token_hash == security.hash_token(old_refresh_token)
+
+    refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        headers={"Cookie": f"refresh_token={old_refresh_token}"},
+    )
+    assert refresh_response.status_code == 200
+    rotated_cookie = SimpleCookie()
+    rotated_cookie.load(refresh_response.headers["set-cookie"])
+    new_refresh_token = rotated_cookie["refresh_token"].value
+    assert new_refresh_token != old_refresh_token
+
+    with test_session_factory() as session:
+        sessions = session.scalars(select(UserSession).order_by(UserSession.id)).all()
+        assert len(sessions) == 2
+        assert sessions[0].revoked_at is not None
+        assert sessions[1].revoked_at is None
+        assert sessions[1].refresh_token_hash == security.hash_token(new_refresh_token)
+
+    logout_response = client.post(
+        "/api/v1/auth/logout",
+        headers={"Cookie": f"refresh_token={new_refresh_token}"},
+    )
+    assert logout_response.status_code == 204
+    cleared_cookie = logout_response.headers["set-cookie"]
+    assert "refresh_token=\"\"" in cleared_cookie
+    assert "Max-Age=0" in cleared_cookie
+    assert "HttpOnly" in cleared_cookie
+    assert "Secure" in cleared_cookie
+
+    with test_session_factory() as session:
+        sessions = session.scalars(select(UserSession).order_by(UserSession.id)).all()
+        assert len(sessions) == 2
+        assert sessions[0].revoked_at is not None
+        assert sessions[1].revoked_at is not None
+        assert sessions[1].refresh_token_hash == security.hash_token(new_refresh_token)
+
+    replay_response = client.post(
+        "/api/v1/auth/refresh",
+        headers={"Cookie": f"refresh_token={new_refresh_token}"},
+    )
+    assert replay_response.status_code == 401
+
+
+def test_startup_migration_adds_username_without_deleting_existing_users() -> None:
+    legacy_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    try:
+        with legacy_engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY,
+                    email VARCHAR(254) NOT NULL,
+                    display_name VARCHAR(80) NOT NULL,
+                    password_hash VARCHAR(512) NOT NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT 0,
+                    created_at DATETIME
+                )
+                """
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO users (email, display_name, password_hash, is_active) "
+                "VALUES ('existing@example.com', 'Existing Player', 'hash', 1)"
+            )
+
+        upgrade_sqlite_schema(legacy_engine)
+
+        with legacy_engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("users")}
+            existing_user = connection.exec_driver_sql(
+                "SELECT email, username FROM users WHERE id = 1"
+            ).one()
+            indexes = inspect(connection).get_indexes("users")
+
+        assert "username" in columns
+        assert existing_user == ("existing@example.com", None)
+        assert any(index["name"] == "ix_users_username" for index in indexes)
+    finally:
+        legacy_engine.dispose()
+
+
 def test_five_wrong_codes_expire_the_otp(
     api_client: tuple[TestClient, list[tuple[str, str]], fakeredis.FakeRedis, sessionmaker[Session]],
 ) -> None:
@@ -171,6 +339,14 @@ def test_forgot_password_and_one_time_reset_code(
         session.commit()
         session.refresh(user)
         user_id = user.id
+        session.add(
+            UserSession(
+                user_id=user_id,
+                refresh_token_hash=security.hash_token("remembered-before-reset"),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            )
+        )
+        session.commit()
 
     unknown_response = client.post(
         "/api/v1/auth/forgot-password",
@@ -189,7 +365,7 @@ def test_forgot_password_and_one_time_reset_code(
     assert sent_email == "reset-player@example.com"
     assert len(otp) == 6 and otp.isdigit()
 
-    otp_key = otp_store._password_reset_otp_key(user_id)
+    otp_key = otp_store._password_reset_otp_key(sent_email)
     assert fake_redis.get(otp_key) == otp
     assert 1 <= fake_redis.ttl(otp_key) <= otp_store.OTP_TTL_SECONDS
 
@@ -245,3 +421,8 @@ def test_forgot_password_and_one_time_reset_code(
         assert user.is_active is True
         assert PasswordHash.recommended().verify(new_password, user.password_hash)
         assert not PasswordHash.recommended().verify(old_password, user.password_hash)
+        remembered_session = session.scalar(
+            select(UserSession).where(UserSession.user_id == user_id)
+        )
+        assert remembered_session is not None
+        assert remembered_session.revoked_at is not None
