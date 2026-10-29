@@ -379,11 +379,17 @@ def test_perpetual_check_is_a_loss_after_threefold_repetition() -> None:
     assert not is_draw(state)
 
 
-def repeated_chase_state(*, real_root: bool = False) -> XiangqiState:
+def repeated_chase_state(
+    *,
+    real_root: bool = False,
+    chaser_kind: PieceKind = PieceKind.HORSE,
+    target_kind: PieceKind = PieceKind.ROOK,
+    target_is_unadvanced_pawn: bool = False,
+) -> XiangqiState:
     state = make_state(
         pieces=[
-            (Side.RED, PieceKind.HORSE, (4, 4)),
-            (Side.BLACK, PieceKind.ROOK, (4, 6)),
+            (Side.RED, chaser_kind, (4, 4)),
+            (Side.BLACK, target_kind, (4, 6)),
         ]
     )
     chaser = state.board[4][4]
@@ -393,16 +399,30 @@ def repeated_chase_state(*, real_root: bool = False) -> XiangqiState:
     threat = ChaseThreat(
         target_id=target.identity,
         target_kind=target.kind,
-        target_is_unadvanced_pawn=False,
+        target_is_unadvanced_pawn=target_is_unadvanced_pawn,
         chaser_ids=(chaser.identity,),
         chaser_kinds=(chaser.kind,),
         has_real_root=real_root,
     )
     records = (
-        MoveRecord(Side.RED, Move((4, 4), (3, 2)), chaser.identity, False, (threat,)),
-        MoveRecord(Side.BLACK, Move((4, 6), (5, 4)), target.identity, False),
-        MoveRecord(Side.RED, Move((3, 2), (4, 4)), chaser.identity, False, (threat,)),
-        MoveRecord(Side.BLACK, Move((5, 4), (4, 6)), target.identity, False),
+        MoveRecord(Side.RED, Move((4, 4), (3, 2)), chaser.identity, False),
+        MoveRecord(
+            Side.BLACK,
+            Move((4, 6), (5, 4)),
+            target.identity,
+            False,
+            (threat,),
+            chased_by=Side.RED,
+        ),
+        MoveRecord(Side.RED, Move((3, 2), (4, 4)), chaser.identity, False),
+        MoveRecord(
+            Side.BLACK,
+            Move((5, 4), (4, 6)),
+            target.identity,
+            False,
+            (threat,),
+            chased_by=Side.RED,
+        ),
     )
     repeated_positions = (
         state.position_key,
@@ -425,6 +445,48 @@ def test_perpetual_chase_of_a_piece_with_a_real_root_draws() -> None:
     state = repeated_chase_state(real_root=True)
 
     assert game_status(state) is GameStatus.DRAW
+
+
+def test_perpetual_same_type_chase_draws() -> None:
+    state = repeated_chase_state(
+        chaser_kind=PieceKind.ROOK,
+        target_kind=PieceKind.ROOK,
+    )
+
+    assert game_status(state) is GameStatus.DRAW
+
+
+def test_perpetual_pawn_chase_is_not_a_loss() -> None:
+    state = repeated_chase_state(chaser_kind=PieceKind.PAWN)
+
+    assert game_status(state) is GameStatus.DRAW
+
+
+def test_unadvanced_enemy_pawn_is_not_a_chase_target() -> None:
+    state = repeated_chase_state(
+        target_kind=PieceKind.PAWN,
+        target_is_unadvanced_pawn=True,
+    )
+
+    assert game_status(state) is GameStatus.ACTIVE
+
+
+def test_chase_is_recorded_when_defender_moves_the_target_away() -> None:
+    state = make_state(
+        pieces=[
+            (Side.RED, PieceKind.ROOK, (5, 0)),
+            (Side.BLACK, PieceKind.HORSE, (5, 3)),
+        ],
+        turn=Side.BLACK,
+    )
+    target = state.board[5][3]
+    assert target is not None and target.identity is not None
+
+    after_evasion = apply_move(state, Move((5, 3), (3, 2)))
+    response = after_evasion.move_history[-1]
+
+    assert response.chased_by is Side.RED
+    assert {threat.target_id for threat in response.chased_targets} == {target.identity}
 
 
 def test_wxf_natural_move_count_requires_100_counted_moves_per_side() -> None:
