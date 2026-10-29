@@ -1,20 +1,25 @@
 """Unit tests for Xiangqi FEN, movement, legality, and game outcomes."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 import pytest
 
 from app.xiangqi import (
-    FEN_FIFTY_MOVE_LIMIT,
+    NATURAL_CHECK_LIMIT_PER_SIDE,
+    NATURAL_MOVE_LIMIT_PER_SIDE,
     STARTING_FEN,
+    ChaseThreat,
     GameStatus,
     Move,
+    MoveRecord,
     Piece,
     PieceKind,
     Side,
     XiangqiState,
     apply_move,
     game_status,
+    game_winner,
     generals_face,
     is_checkmate,
     is_draw,
@@ -36,6 +41,8 @@ def make_state(
     black_general: tuple[int, int] = (0, 5),
     halfmove_clock: int = 0,
     fullmove_number: int = 1,
+    natural_move_counts: tuple[int, int] = (0, 0),
+    natural_check_counts: tuple[int, int] = (0, 0),
 ) -> XiangqiState:
     board: list[list[Piece | None]] = [[None] * 9 for _ in range(10)]
     placements = [
@@ -52,6 +59,8 @@ def make_state(
         turn=turn,
         halfmove_clock=halfmove_clock,
         fullmove_number=fullmove_number,
+        natural_move_counts=natural_move_counts,
+        natural_check_counts=natural_check_counts,
     )
 
 
@@ -322,7 +331,7 @@ def test_stalemate_is_a_loss_not_a_draw_in_xiangqi() -> None:
             (Side.RED, PieceKind.PAWN, (2, 4)),
         ],
         turn=Side.BLACK,
-        halfmove_clock=FEN_FIFTY_MOVE_LIMIT,
+        natural_move_counts=(NATURAL_MOVE_LIMIT_PER_SIDE,) * 2,
     )
 
     assert not is_in_check(state)
@@ -348,13 +357,101 @@ def test_repeated_position_is_a_draw_after_four_occurrences() -> None:
     assert game_status(state) is GameStatus.DRAW
 
 
-def test_fifty_move_fen_clock_draws_after_one_hundred_halfmoves() -> None:
-    fen = STARTING_FEN.replace(" w - - 0 1", " w - - 99 1")
-    state = XiangqiState.from_fen(fen)
-    next_state = apply_move(state, Move((9, 1), (7, 0)))
+def test_perpetual_check_is_a_loss_after_threefold_repetition() -> None:
+    state = make_state(
+        red_general=(9, 5),
+        black_general=(0, 3),
+        pieces=[(Side.RED, PieceKind.ROOK, (4, 4))],
+    )
+    cycle = (
+        Move((4, 4), (4, 3)),
+        Move((0, 3), (0, 4)),
+        Move((4, 3), (4, 4)),
+        Move((0, 4), (0, 3)),
+    )
+    for _ in range(2):
+        for move in cycle:
+            state = apply_move(state, move)
 
-    assert next_state.halfmove_clock == FEN_FIFTY_MOVE_LIMIT
-    assert is_draw(next_state)
+    assert state.position_history.count(state.position_key) == 3
+    assert game_status(state) is GameStatus.PERPETUAL_CHECK_LOSS
+    assert game_winner(state) is Side.BLACK
+    assert not is_draw(state)
+
+
+def repeated_chase_state(*, real_root: bool = False) -> XiangqiState:
+    state = make_state(
+        pieces=[
+            (Side.RED, PieceKind.HORSE, (4, 4)),
+            (Side.BLACK, PieceKind.ROOK, (4, 6)),
+        ]
+    )
+    chaser = state.board[4][4]
+    target = state.board[4][6]
+    assert chaser is not None and chaser.identity is not None
+    assert target is not None and target.identity is not None
+    threat = ChaseThreat(
+        target_id=target.identity,
+        target_kind=target.kind,
+        target_is_unadvanced_pawn=False,
+        chaser_ids=(chaser.identity,),
+        chaser_kinds=(chaser.kind,),
+        has_real_root=real_root,
+    )
+    records = (
+        MoveRecord(Side.RED, Move((4, 4), (3, 2)), chaser.identity, False, (threat,)),
+        MoveRecord(Side.BLACK, Move((4, 6), (5, 4)), target.identity, False),
+        MoveRecord(Side.RED, Move((3, 2), (4, 4)), chaser.identity, False, (threat,)),
+        MoveRecord(Side.BLACK, Move((5, 4), (4, 6)), target.identity, False),
+    )
+    repeated_positions = (
+        state.position_key,
+        "repeated-position-a",
+        state.position_key,
+        "repeated-position-b",
+        state.position_key,
+    )
+    return replace(state, position_history=repeated_positions, move_history=records)
+
+
+def test_perpetual_chase_of_unprotected_different_piece_loses() -> None:
+    state = repeated_chase_state()
+
+    assert game_status(state) is GameStatus.PERPETUAL_CHASE_LOSS
+    assert game_winner(state) is Side.BLACK
+
+
+def test_perpetual_chase_of_a_piece_with_a_real_root_draws() -> None:
+    state = repeated_chase_state(real_root=True)
+
+    assert game_status(state) is GameStatus.DRAW
+
+
+def test_wxf_natural_move_count_requires_100_counted_moves_per_side() -> None:
+    state = replace(XiangqiState.initial(), natural_move_counts=(99, 99))
+    after_red = apply_move(state, Move((9, 1), (7, 0)))
+    after_black = apply_move(after_red, Move((0, 1), (2, 0)))
+
+    assert after_red.natural_move_counts == (100, 99)
+    assert not is_draw(after_red)
+    assert after_black.natural_move_counts == (100, 100)
+    assert is_draw(after_black)
+
+
+def test_check_moves_after_ten_checks_do_not_count_toward_natural_limit() -> None:
+    state = make_state(
+        red_general=(9, 5),
+        black_general=(0, 3),
+        pieces=[(Side.RED, PieceKind.ROOK, (4, 4))],
+        natural_move_counts=(99, 0),
+        natural_check_counts=(NATURAL_CHECK_LIMIT_PER_SIDE, 0),
+    )
+
+    after_check = apply_move(state, Move((4, 4), (4, 3)))
+
+    assert after_check.move_history[-1].gives_check
+    assert after_check.natural_move_counts == (99, 0)
+    assert after_check.natural_check_counts == (10, 0)
 
 
 def test_pawn_moves_and_captures_reset_the_halfmove_clock() -> None:
@@ -368,11 +465,15 @@ def test_pawn_moves_and_captures_reset_the_halfmove_clock() -> None:
             (Side.BLACK, PieceKind.PAWN, (5, 1)),
         ],
         halfmove_clock=49,
+        natural_move_counts=(50, 60),
+        natural_check_counts=(3, 4),
     )
     after_capture = apply_move(capture_state, Move((5, 0), (5, 1)))
 
     assert after_pawn_move.halfmove_clock == 0
     assert after_capture.halfmove_clock == 0
+    assert after_capture.natural_move_counts == (0, 0)
+    assert after_capture.natural_check_counts == (0, 0)
 
 
 def test_move_updates_side_to_move_and_fen_fullmove_number() -> None:
