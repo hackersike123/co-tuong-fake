@@ -764,6 +764,15 @@ def get_participant_role(room_id: int, participant_token: str) -> str | None:
     return str(role) if role else None
 
 
+def get_room_participant_roles(room_id: int) -> dict[str, str]:
+    """Return active participant roles for secure history persistence.
+
+    Callers must hash participant tokens before storing them outside Redis.
+    """
+    participants = redis_client.hgetall(_participants_key(room_id))
+    return {str(token): str(role) for token, role in participants.items()}
+
+
 def start_room(room_id: int, host_token: str) -> int:
     """Start a room atomically and remove it from the public lobby."""
     return int(

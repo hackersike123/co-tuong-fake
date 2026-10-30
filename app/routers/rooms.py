@@ -18,7 +18,7 @@ from ..email_service import (
 )
 from ..match_service import list_match_history, match_payload, record_completed_match
 from ..room_hub import room_hub
-from ..room_access import authorize_room_access
+from ..room_access import authorize_archived_room_history, authorize_room_access
 from ..room_schemas import (
     RoomAccessResponse,
     RoomActionRequest,
@@ -597,12 +597,61 @@ def get_room_game_state(
     response_model=list[RoomMatchHistory],
     summary="Read completed game history for a room",
 )
-def get_room_match_history(room_id: int) -> list[RoomMatchHistory]:
+def get_room_match_history(
+    room_id: int,
+    participant_token: str | None = Header(default=None, alias="X-Room-Participant-Token"),
+    invite_token: str | None = Header(default=None, alias="X-Room-Invite-Token"),
+    password: str | None = Header(default=None, alias="X-Room-Password"),
+    room_uuid: str | None = Header(default=None, alias="X-Room-UUID"),
+) -> list[RoomMatchHistory]:
     """Return the newest saved match records, even if the room has closed."""
+    room = _room_summary(room_id)
     try:
-        matches = list_match_history(room_id)
+        if room is None:
+            matches = list_match_history(room_id, room_uuid)
+            if not matches:
+                raise _room_not_found()
+            try:
+                matches = authorize_archived_room_history(
+                    matches,
+                    participant_token=participant_token,
+                )
+            except HTTPException as access_error:
+                if access_error.status_code in {
+                    status.HTTP_401_UNAUTHORIZED,
+                    status.HTTP_403_FORBIDDEN,
+                }:
+                    raise _room_not_found() from access_error
+                raise
+        else:
+            try:
+                authorize_room_access(
+                    room,
+                    "read_game_history",
+                    participant_token=participant_token,
+                    invite_token=invite_token,
+                    password=password,
+                )
+            except HTTPException as access_error:
+                if access_error.status_code not in {
+                    status.HTTP_401_UNAUTHORIZED,
+                    status.HTTP_403_FORBIDDEN,
+                }:
+                    raise
+                matches = list_match_history(room_id, room["room_uuid"])
+                if not matches:
+                    raise
+                matches = authorize_archived_room_history(
+                    matches,
+                    participant_token=participant_token,
+                )
+            else:
+                matches = list_match_history(room_id, room["room_uuid"])
     except SQLAlchemyError as exc:
         logger.exception("Could not load match history for room %s", room_id)
+        raise _service_unavailable() from exc
+    except RedisError as exc:
+        logger.exception("Could not validate history access for room %s", room_id)
         raise _service_unavailable() from exc
     return [RoomMatchHistory(**match_payload(match)) for match in matches]
 
@@ -818,7 +867,12 @@ def leave_public_room(
             raise _service_unavailable() from exc
         if game is None:
             raise _room_not_found()
-        record_completed_match(room_id)
+        record_completed_match(
+            room_id,
+            additional_access_tokens={
+                payload.participant_token: "player1" if result == 4 else "player2"
+            },
+        )
         loser_role = "player1" if result == 4 else "player2"
         event = {
             "type": "game.forfeit",
@@ -1051,12 +1105,19 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
         )
         await websocket.close(code=4404, reason="Room or participant token not found")
         return
-    if role == "spectator" and not room["allow_spectators"]:
-        logger.warning(
-            "Room WebSocket rejected a spectator against room policy",
-            extra={"event": "websocket.auth_failed", "room_id": room_id, "reason": "spectators_disabled"},
+    if role not in {"player1", "player2", "spectator"} or (
+        role == "spectator" and not room["allow_spectators"]
+    ):
+        reason = (
+            "spectators_disabled"
+            if role == "spectator"
+            else "invalid_participant_role"
         )
-        await websocket.close(code=4403, reason="Spectators are not allowed in this room")
+        logger.warning(
+            "Room WebSocket rejected a participant against room policy",
+            extra={"event": "websocket.auth_failed", "room_id": room_id, "reason": reason},
+        )
+        await websocket.close(code=4403, reason="Room access is not authorized")
         return
 
     reconnected = False

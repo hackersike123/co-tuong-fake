@@ -370,7 +370,12 @@
         if (!activeRoomAccess) return;
         const roomId = activeRoomAccess.room_id || activeRoomAccess.id;
         try {
-          const response = await fetch(`/api/v1/rooms/${roomId}/matches`);
+          const response = await fetch(`/api/v1/rooms/${roomId}/matches`, {
+            headers: {
+              "X-Room-Participant-Token": activeRoomAccess.participant_token,
+              "X-Room-UUID": activeRoomAccess.room_uuid,
+            },
+          });
           if (!response.ok) throw new Error("Không thể tải lịch sử trận.");
           const history = await response.json();
           matchHistory.replaceChildren();

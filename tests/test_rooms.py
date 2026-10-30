@@ -1,6 +1,7 @@
 """Tests for Redis-backed public room lifecycle and participant roles."""
 
 from collections.abc import Iterator
+import json
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
@@ -10,16 +11,17 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app import email_service, match_service, room_store
-from app.database import Base
+from app.database import Base, upgrade_sqlite_schema
 from app.email_service import EmailConfigurationError, EmailDeliveryError
 from app.models import Match
 from app.routers import rooms as room_routes
 from app.routers.rooms import router as rooms_router
+from app.room_access import hash_room_token
 from app.security import verify_password
 from app.xiangqi import STARTING_FEN
 
@@ -81,6 +83,58 @@ def _create_started_room(client: TestClient, room_name: str = "Finished game") -
     )
     assert started.status_code == 200, started.text
     return host, opponent
+
+
+def _create_finished_private_room(
+    client: TestClient,
+    *,
+    allow_spectators: bool,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str]:
+    host = client.post(
+        "/api/v1/rooms/",
+        json={
+            "room_name": "Private history",
+            "is_public": False,
+            "password": "private-history-password",
+            "allow_spectators": allow_spectators,
+        },
+    ).json()
+    invite_token = parse_qs(urlparse(host["join_url"]).query)["token"][0]
+    opponent = client.post(
+        f"/api/v1/rooms/{host['room_id']}/join",
+        json={"password": "private-history-password"},
+    ).json()
+    spectator = None
+    if allow_spectators:
+        spectator = client.post(
+            f"/api/v1/rooms/{host['room_id']}/join",
+            json={"invite_token": invite_token},
+        ).json()
+    else:
+        denied = client.post(
+            f"/api/v1/rooms/{host['room_id']}/join",
+            json={"invite_token": invite_token},
+        )
+        assert denied.status_code == 403
+
+    _ready_player_two(client, opponent["participant_token"], host["room_id"])
+    started = client.post(
+        f"/api/v1/rooms/{host['room_id']}/start",
+        json={"participant_token": host["participant_token"]},
+    )
+    assert started.status_code == 200, started.text
+    with client.websocket_connect(
+        f"/api/v1/rooms/{host['room_id']}/ws?participant_token={host['participant_token']}"
+    ) as host_ws:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{host['room_id']}/ws?participant_token={opponent['participant_token']}"
+        ) as opponent_ws:
+            assert host_ws.receive_json()["game"]["status"] == "playing"
+            assert opponent_ws.receive_json()["game"]["status"] == "playing"
+            opponent_ws.send_json({"type": "resign"})
+            assert _receive_socket_event(host_ws, "game_over")["reason"] == "resignation"
+            assert _receive_socket_event(opponent_ws, "game_over")["reason"] == "resignation"
+    return host, opponent, spectator, invite_token
 
 
 def test_start_initializes_server_authoritative_board_and_clocks(
@@ -211,6 +265,213 @@ def test_resignation_saves_match_and_move_notation_once(
     match_service.record_completed_match(room_id)
     with match_service.SessionLocal() as session:
         assert len(session.scalars(select(Match)).all()) == 1
+
+
+def test_private_history_requires_participant_or_allowed_spectator_after_room_cleanup(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host, opponent, spectator, invite_token = _create_finished_private_room(
+        client,
+        allow_spectators=True,
+    )
+    room_id = host["room_id"]
+    url = f"/api/v1/rooms/{room_id}/matches"
+
+    anonymous = client.get(url)
+    assert anonymous.status_code == 404
+    assert "final_fen" not in anonymous.json()
+    outsider = client.post("/api/v1/rooms/", json={"room_name": "Other room"}).json()
+    assert client.get(
+        url,
+        headers={"X-Room-Participant-Token": outsider["participant_token"]},
+    ).status_code == 404
+
+    host_history = client.get(
+        url,
+        headers={"X-Room-Participant-Token": host["participant_token"]},
+    )
+    opponent_history = client.get(
+        url,
+        headers={"X-Room-Participant-Token": opponent["participant_token"]},
+    )
+    spectator_history = client.get(
+        url,
+        headers={"X-Room-Participant-Token": spectator["participant_token"]},
+    )
+    invite_history = client.get(url, headers={"X-Room-Invite-Token": invite_token})
+    assert host_history.status_code == 200
+    assert opponent_history.status_code == 200
+    assert spectator_history.status_code == 200
+    assert invite_history.status_code == 404
+    assert host_history.json()[0]["result"] == "resignation"
+    assert host_history.json()[0]["final_fen"]
+
+    with match_service.SessionLocal() as session:
+        match = session.scalar(select(Match).where(Match.room_id == room_id))
+        assert match is not None
+        assert match.is_public is False
+        assert match.has_password is True
+        assert match.allow_spectators is True
+        assert host["participant_token"] not in match.access_token_hashes
+        assert invite_token not in match.access_token_hashes
+        assert json.loads(match.access_token_hashes)
+
+
+def test_private_history_blocks_guests_when_spectators_are_disabled(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host, _opponent, _spectator, invite_token = _create_finished_private_room(
+        client,
+        allow_spectators=False,
+    )
+    url = f"/api/v1/rooms/{host['room_id']}/matches"
+
+    assert client.get(url).status_code == 404
+    assert client.get(url, headers={"X-Room-Invite-Token": invite_token}).status_code == 404
+    assert client.get(
+        url,
+        headers={"X-Room-Participant-Token": host["participant_token"]},
+    ).status_code == 200
+
+
+def test_reused_room_code_cannot_mix_match_history_from_different_rooms(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host, _opponent, _spectator, _invite_token = _create_finished_private_room(
+        client,
+        allow_spectators=True,
+    )
+    private_uuid = host["room_uuid"]
+    public_uuid = "c" * 32
+    with match_service.SessionLocal() as session:
+        session.add(
+            Match(
+                match_key=f"{public_uuid}:1",
+                room_id=host["room_id"],
+                room_uuid=public_uuid,
+                round_number=1,
+                room_name="Reused public room code",
+                red_player="Red",
+                black_player="Black",
+                result="draw",
+                notation="",
+                final_fen=STARTING_FEN,
+                is_public=True,
+                has_password=False,
+                allow_spectators=True,
+                access_token_hashes="{}",
+            )
+        )
+        session.commit()
+
+    url = f"/api/v1/rooms/{host['room_id']}/matches"
+    latest_public_history = client.get(url)
+    assert latest_public_history.status_code == 200
+    assert len(latest_public_history.json()) == 1
+    assert latest_public_history.json()[0]["room_uuid"] == public_uuid
+    assert latest_public_history.json()[0]["final_fen"] == STARTING_FEN
+
+    private_without_token = client.get(url, headers={"X-Room-UUID": private_uuid})
+    assert private_without_token.status_code == 404
+    private_with_token = client.get(
+        url,
+        headers={
+            "X-Room-UUID": private_uuid,
+            "X-Room-Participant-Token": host["participant_token"],
+        },
+    )
+    assert private_with_token.status_code == 200
+    assert len(private_with_token.json()) == 1
+    assert private_with_token.json()[0]["room_uuid"] == private_uuid
+
+
+def test_archived_history_only_returns_rounds_associated_with_participant(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host, former_opponent, _spectator, _invite_token = _create_finished_private_room(
+        client,
+        allow_spectators=True,
+    )
+    room_id = host["room_id"]
+    room_uuid = host["room_uuid"]
+    replacement_token = "replacement-player-two-token-0000000000000000"
+    with match_service.SessionLocal() as session:
+        session.add(
+            Match(
+                match_key=f"{room_uuid}:2",
+                room_id=room_id,
+                room_uuid=room_uuid,
+                round_number=2,
+                room_name="Private history",
+                red_player="Host",
+                black_player="Replacement player",
+                result="draw",
+                notation="round two record",
+                final_fen=STARTING_FEN,
+                is_public=False,
+                has_password=True,
+                allow_spectators=True,
+                access_token_hashes=json.dumps(
+                    {
+                        hash_room_token(host["participant_token"]): "player1",
+                        hash_room_token(replacement_token): "player2",
+                    }
+                ),
+            )
+        )
+        session.commit()
+
+    url = f"/api/v1/rooms/{room_id}/matches"
+    old_player_history = client.get(
+        url,
+        headers={
+            "X-Room-UUID": room_uuid,
+            "X-Room-Participant-Token": former_opponent["participant_token"],
+        },
+    )
+    host_history = client.get(
+        url,
+        headers={
+            "X-Room-UUID": room_uuid,
+            "X-Room-Participant-Token": host["participant_token"],
+        },
+    )
+
+    assert old_player_history.status_code == 200
+    assert [match["round_number"] for match in old_player_history.json()] == [1]
+    assert host_history.status_code == 200
+    assert [match["round_number"] for match in host_history.json()] == [2, 1]
+
+
+def test_sqlite_upgrade_adds_fail_closed_match_access_columns() -> None:
+    legacy_engine = create_engine("sqlite://")
+    with legacy_engine.begin() as connection:
+        connection.execute(text("CREATE TABLE users (id INTEGER PRIMARY KEY, email VARCHAR(254))"))
+        connection.execute(text("CREATE TABLE matches (id INTEGER PRIMARY KEY)"))
+
+    upgrade_sqlite_schema(legacy_engine)
+
+    columns = {column["name"] for column in inspect(legacy_engine).get_columns("matches")}
+    assert {
+        "is_public",
+        "has_password",
+        "allow_spectators",
+        "access_token_hashes",
+    }.issubset(columns)
+    with legacy_engine.begin() as connection:
+        connection.execute(text("INSERT INTO matches (id) VALUES (1)"))
+        legacy_row = connection.execute(
+            text(
+                "SELECT is_public, has_password, allow_spectators, access_token_hashes "
+                "FROM matches WHERE id = 1"
+            )
+        ).one()
+    assert tuple(legacy_row) == (0, 0, 0, "{}")
+    legacy_engine.dispose()
 
 
 def test_checkmate_broadcasts_game_over_and_saves_final_move(
@@ -768,6 +1029,13 @@ def test_private_room_details_require_room_scoped_credentials(
     assert host_details.json()["room_name"] == "Private details"
     assert "password" not in host_details.json()
     assert "password_hash" not in host_details.json()
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{private_room['room_id']}/ws"
+            f"?participant_token={other_room['participant_token']}"
+        ):
+            pass
+    assert closed.value.code == 4404
 
 
 def test_private_game_state_requires_access_and_respects_spectator_policy(
