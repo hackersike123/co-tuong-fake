@@ -5,7 +5,7 @@ import secrets
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
@@ -16,6 +16,7 @@ from ..email_service import (
     send_room_invitation_email,
 )
 from ..room_hub import room_hub
+from ..room_access import authorize_room_access
 from ..room_schemas import (
     RoomAccessResponse,
     RoomActionRequest,
@@ -388,11 +389,27 @@ def join_room_by_code(
     response_model=RoomSummary,
     summary="Get room details by shareable room ID",
 )
-def get_room_details(room_id: int) -> RoomSummary:
+def get_room_details(
+    room_id: int,
+    participant_token: str | None = Header(default=None, alias="X-Room-Participant-Token"),
+    invite_token: str | None = Header(default=None, alias="X-Room-Invite-Token"),
+    password: str | None = Header(default=None, alias="X-Room-Password"),
+) -> RoomSummary:
     """Return a room's public details for a direct invitation link."""
     room = _room_summary(room_id)
     if room is None:
         raise _room_not_found()
+    try:
+        authorize_room_access(
+            room,
+            "read_room",
+            participant_token=participant_token,
+            invite_token=invite_token,
+            password=password,
+        )
+    except RedisError as exc:
+        logger.exception("Could not validate read access for room %s", room_id)
+        raise _service_unavailable() from exc
     return RoomSummary(**room)
 
 
@@ -401,11 +418,27 @@ def get_room_details(room_id: int) -> RoomSummary:
     response_model=RoomGameSnapshot,
     summary="Get the current server-authoritative board and clocks",
 )
-def get_room_game_state(room_id: int) -> RoomGameSnapshot:
+def get_room_game_state(
+    room_id: int,
+    participant_token: str | None = Header(default=None, alias="X-Room-Participant-Token"),
+    invite_token: str | None = Header(default=None, alias="X-Room-Invite-Token"),
+    password: str | None = Header(default=None, alias="X-Room-Password"),
+) -> RoomGameSnapshot:
     """Return the current FEN, side to move, version, and remaining clocks."""
     room = _room_summary(room_id)
     if room is None:
         raise _room_not_found()
+    try:
+        authorize_room_access(
+            room,
+            "read_game_state",
+            participant_token=participant_token,
+            invite_token=invite_token,
+            password=password,
+        )
+    except RedisError as exc:
+        logger.exception("Could not validate game-state access for room %s", room_id)
+        raise _service_unavailable() from exc
     if room["status"] == "waiting":
         raise HTTPException(status_code=409, detail="The game has not started")
     try:
@@ -610,6 +643,11 @@ def leave_public_room(
                 {"type": "room.removed", "room_id": room_id, "reason": "host_left"},
             )
         background_tasks.add_task(
+            room_hub.revoke_participant,
+            room_id,
+            payload.participant_token,
+        )
+        background_tasks.add_task(
             room_hub.broadcast_room,
             room_id,
             {"type": "room.closed", "room_id": room_id},
@@ -633,12 +671,22 @@ def leave_public_room(
             "game": game,
         }
         if result == 4:
-            background_tasks.add_task(room_hub.close_after_forfeit, room_id, event)
+            background_tasks.add_task(
+                room_hub.close_after_forfeit,
+                room_id,
+                event,
+                payload.participant_token,
+            )
             return RoomLeaveResponse(
                 message="Host forfeited; room closed",
                 room_deleted=True,
             )
-        background_tasks.add_task(room_hub.publish_forfeit, room_id, event)
+        background_tasks.add_task(
+            room_hub.publish_forfeit,
+            room_id,
+            event,
+            payload.participant_token,
+        )
         return RoomLeaveResponse(
             message="Player forfeited; game finished",
             room_deleted=False,
@@ -646,6 +694,11 @@ def leave_public_room(
 
     room = _room_summary(room_id)
     if room is not None:
+        background_tasks.add_task(
+            room_hub.revoke_participant,
+            room_id,
+            payload.participant_token,
+        )
         background_tasks.add_task(
             room_hub.broadcast_room,
             room_id,
@@ -838,6 +891,13 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             },
         )
         await websocket.close(code=4404, reason="Room or participant token not found")
+        return
+    if role == "spectator" and not room["allow_spectators"]:
+        logger.warning(
+            "Room WebSocket rejected a spectator against room policy",
+            extra={"event": "websocket.auth_failed", "room_id": room_id, "reason": "spectators_disabled"},
+        )
+        await websocket.close(code=4403, reason="Spectators are not allowed in this room")
         return
 
     reconnected = False

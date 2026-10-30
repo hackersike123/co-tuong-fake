@@ -115,7 +115,7 @@ class RoomHub:
                             break
                         if message.get("type") != "message":
                             continue
-                        self._handle_cluster_message(message.get("data"))
+                        await self._handle_cluster_message(message.get("data"))
             except asyncio.CancelledError:
                 raise
             except (RedisError, OSError):
@@ -131,7 +131,7 @@ class RoomHub:
             if not self._closing:
                 await asyncio.sleep(1)
 
-    def _handle_cluster_message(self, raw_message: Any) -> None:
+    async def _handle_cluster_message(self, raw_message: Any) -> None:
         """Decode a published event and enqueue it for this worker's sockets."""
         try:
             envelope = json.loads(raw_message)
@@ -151,7 +151,7 @@ class RoomHub:
         elif envelope.get("scope") == "room":
             room_id = envelope.get("room_id")
             if isinstance(room_id, int):
-                self._deliver_room_event(room_id, event)
+                await self._deliver_room_event(room_id, event)
 
     async def _publish_cluster_event(
         self,
@@ -189,13 +189,84 @@ class RoomHub:
         if scope == "lobby":
             self._deliver_lobby_event(event)
         elif room_id is not None:
-            self._deliver_room_event(room_id, event)
+            await self._deliver_room_event(room_id, event)
 
     def _deliver_lobby_event(self, event: dict[str, Any]) -> None:
         self._enqueue_events(tuple(self._lobby_clients), event)
 
-    def _deliver_room_event(self, room_id: int, event: dict[str, Any]) -> None:
+    async def _deliver_room_event(self, room_id: int, event: dict[str, Any]) -> None:
+        if event.get("type") == "room.access_revoked":
+            participant_token = event.get("participant_token")
+            if isinstance(participant_token, str):
+                await self._revoke_local_participant(room_id, participant_token)
+            return
         self._enqueue_events(tuple(self._room_clients.get(room_id, ())), event)
+
+    async def _revoke_local_participant(
+        self,
+        room_id: int,
+        participant_token: str,
+    ) -> None:
+        """Drop a revoked participant's local sockets before more room events."""
+        revoked_sockets: list[WebSocket] = []
+        async with self._lock:
+            clients = self._room_clients.get(room_id)
+            if clients is None:
+                return
+            for websocket in tuple(clients):
+                if self._room_participant_tokens.get(websocket) != participant_token:
+                    continue
+                clients.discard(websocket)
+                self._room_participant_tokens.pop(websocket, None)
+                self._active_connection_count -= 1
+                queue = self._outbound_queues.get(websocket)
+                if queue is not None:
+                    while not queue.empty():
+                        try:
+                            queue.get_nowait()
+                            queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
+                self._remove_sender(websocket)
+                revoked_sockets.append(websocket)
+            if not clients:
+                self._room_clients.pop(room_id, None)
+
+        for websocket in revoked_sockets:
+            try:
+                await websocket.close(code=4403, reason="Room access was revoked")
+            except (RuntimeError, WebSocketDisconnect):
+                pass
+
+    async def revoke_participant(
+        self,
+        room_id: int,
+        participant_token: str,
+        *,
+        drain: bool = False,
+    ) -> None:
+        """Revoke sockets across workers after the participant leaves a room."""
+        if drain:
+            async with self._lock:
+                queues = tuple(
+                    self._outbound_queues[websocket]
+                    for websocket in self._room_clients.get(room_id, ())
+                    if self._room_participant_tokens.get(websocket) == participant_token
+                    and websocket in self._outbound_queues
+                )
+            for queue in queues:
+                try:
+                    await asyncio.wait_for(queue.join(), timeout=1)
+                except TimeoutError:
+                    logger.warning(
+                        "Could not flush final room event before revoking participant socket",
+                        extra={"event": "websocket.revoke_flush_timeout", "room_id": room_id},
+                    )
+        await self._publish_cluster_event(
+            "room",
+            {"type": "room.access_revoked", "participant_token": participant_token},
+            room_id,
+        )
 
     def _enqueue_events(self, clients: tuple[WebSocket, ...], event: dict[str, Any]) -> None:
         for websocket in clients:
@@ -373,12 +444,24 @@ class RoomHub:
                 name=f"room-reconnect-{room_id}-{role}",
             )
 
-    async def publish_forfeit(self, room_id: int, event: dict[str, Any]) -> None:
+    async def publish_forfeit(
+        self,
+        room_id: int,
+        event: dict[str, Any],
+        participant_token: str | None = None,
+    ) -> None:
         """Stop all clocks and tell the room that a player forfeited."""
         await self.stop_room_timers(room_id)
         await self.broadcast_room(room_id, event)
+        if participant_token is not None:
+            await self.revoke_participant(room_id, participant_token, drain=True)
 
-    async def close_after_forfeit(self, room_id: int, event: dict[str, Any]) -> None:
+    async def close_after_forfeit(
+        self,
+        room_id: int,
+        event: dict[str, Any],
+        participant_token: str | None = None,
+    ) -> None:
         """Broadcast a host's loss before deleting the room and closing its clients."""
         await self.stop_room_timers(room_id)
         await self.broadcast_room(room_id, event)
@@ -395,6 +478,8 @@ class RoomHub:
                 room_id,
                 {"type": "room.closed", "room_id": room_id, "reason": "host_forfeit"},
             )
+            if participant_token is not None:
+                await self.revoke_participant(room_id, participant_token, drain=True)
 
     async def _reconnect_timeout_loop(
         self,
