@@ -25,6 +25,7 @@ from ..room_schemas import (
     RoomInviteResponse,
     RoomGameSnapshot,
     RoomJoinRequest,
+    RoomReadyRequest,
     RoomLeaveResponse,
     RoomMoveRequest,
     RoomSummary,
@@ -43,6 +44,7 @@ from ..room_store import (
     list_public_rooms,
     mark_player_disconnected,
     mark_player_reconnected,
+    set_player_ready,
     start_room,
 )
 from ..security import hash_password, verify_password
@@ -109,6 +111,37 @@ def _room_summary(room_id: int) -> dict[str, Any] | None:
     except RedisError as exc:
         logger.exception("Could not read room %s from Redis", room_id)
         raise _service_unavailable() from exc
+
+
+def _update_player_ready(
+    room_id: int,
+    participant_token: str,
+    ready: bool,
+) -> dict[str, Any]:
+    """Set player two's readiness, preserving Redis-backed role validation."""
+    try:
+        result = set_player_ready(room_id, participant_token, ready)
+    except RedisError as exc:
+        logger.exception("Could not update ready state for room %s", room_id)
+        raise _service_unavailable() from exc
+
+    if result == -1:
+        raise _room_not_found()
+    if result == -2:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only player two can change the ready state",
+        )
+    if result == -3:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The room is no longer waiting",
+        )
+
+    room = _room_summary(room_id)
+    if room is None:
+        raise _room_not_found()
+    return room
 
 
 def _process_room_move(
@@ -400,6 +433,33 @@ def join_public_room(
 
 
 @router.post(
+    "/{room_id}/ready",
+    response_model=RoomSummary,
+    summary="Set player two's ready state",
+)
+def ready_room_player(
+    room_id: int,
+    payload: RoomReadyRequest,
+    background_tasks: BackgroundTasks,
+) -> RoomSummary:
+    """Let only player two change readiness before the host starts the game."""
+    room = _update_player_ready(room_id, payload.participant_token, payload.ready)
+    event = {
+        "type": "player.ready",
+        "room": room,
+        "role": "player2",
+        "ready": payload.ready,
+    }
+    background_tasks.add_task(room_hub.broadcast_room, room_id, event)
+    if room["is_public"]:
+        background_tasks.add_task(
+            room_hub.broadcast_lobby,
+            {"type": "room.updated", "room": room},
+        )
+    return RoomSummary(**room)
+
+
+@router.post(
     "/{room_id}/invite",
     response_model=RoomInviteResponse,
     status_code=status.HTTP_202_ACCEPTED,
@@ -488,6 +548,11 @@ def start_public_room(
         raise HTTPException(status_code=409, detail="The room has already started")
     if result == -4:
         raise HTTPException(status_code=409, detail="An opponent must join before the game starts")
+    if result == -5:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Player two must be ready before the game starts",
+        )
 
     room = _room_summary(room_id)
     if room is None:
@@ -607,6 +672,39 @@ async def public_lobby_socket(websocket: WebSocket) -> None:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
                 await room_hub.send_to_client(websocket, {"type": "pong"})
+            elif isinstance(message, dict) and message.get("type") == "join_room":
+                try:
+                    requested_room_id = message.get("room_id")
+                    if isinstance(requested_room_id, bool) or not isinstance(
+                        requested_room_id, (int, str)
+                    ):
+                        raise ValueError("room_id must be an integer")
+                    room_id = int(requested_room_id)
+                    if room_id <= 0:
+                        raise ValueError("room_id must be positive")
+                    join_payload = RoomJoinRequest.model_validate(message)
+                    background_tasks = BackgroundTasks()
+                    access = _join_room_response(room_id, join_payload, background_tasks)
+                    await background_tasks()
+                except (TypeError, ValueError, ValidationError):
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "error", "status": 422, "reason": "invalid_join_payload"},
+                    )
+                except HTTPException as exc:
+                    await room_hub.send_to_client(
+                        websocket,
+                        {
+                            "type": "error",
+                            "status": exc.status_code,
+                            "reason": exc.detail,
+                        },
+                    )
+                else:
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "room.joined", "access": access.model_dump(mode="json")},
+                    )
     except WebSocketDisconnect:
         pass
     except RedisError:
@@ -835,6 +933,44 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
                 await room_hub.send_to_client(websocket, {"type": "pong"})
+            elif isinstance(message, dict) and message.get("type") == "ready":
+                ready = message.get("ready", True)
+                if not isinstance(ready, bool):
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "error", "reason": "invalid_ready_payload"},
+                    )
+                    continue
+                try:
+                    updated_room = await run_in_threadpool(
+                        _update_player_ready,
+                        room_id,
+                        participant_token,
+                        ready,
+                    )
+                except HTTPException as exc:
+                    await room_hub.send_to_client(
+                        websocket,
+                        {
+                            "type": "error",
+                            "status": exc.status_code,
+                            "reason": exc.detail,
+                        },
+                    )
+                    continue
+                await room_hub.broadcast_room(
+                    room_id,
+                    {
+                        "type": "player.ready",
+                        "room": updated_room,
+                        "role": "player2",
+                        "ready": ready,
+                    },
+                )
+                if updated_room["is_public"]:
+                    await room_hub.broadcast_lobby(
+                        {"type": "room.updated", "room": updated_room}
+                    )
             elif isinstance(message, dict) and message.get("type") == "make_move":
                 event = await run_in_threadpool(
                     _process_room_move,

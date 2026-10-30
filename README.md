@@ -208,6 +208,11 @@ includes `has_password`. Public rooms appear in the lobby; private rooms are
 omitted. Rooms with `allow_spectators: false` reject joiners after both player
 slots are filled and reject spectators after a game starts.
 
+The creator is `player1` (Host/Red). The first successful join receives
+`player2` (Black); later joins receive `spectator` when spectators are enabled.
+Redis runs seat assignment as one atomic script, so concurrent joins cannot
+claim the Player 2 slot twice.
+
 Joining a password-protected room requires `password` in the join body, unless
 the client has the room's unguessable invitation token. A private room without
 a password can only be joined with its invitation token. For example:
@@ -232,11 +237,17 @@ player count, and spectator count. Join from the list or from a shared room link
 with `POST /api/v1/rooms/{room_id}/join`
 and `{}` as the body. For a direct link, send its `token` as `invite_token` in
 the join request. If the room has a password, the link token is sufficient;
-otherwise send the room `password`. The first joiner receives `player2`; later
-joiners are spectators when allowed. Joining a room that has started is allowed
-only as a spectator when spectators are enabled.
+otherwise send the room `password`. Player 2 marks ready with
+`POST /api/v1/rooms/{room_id}/ready` and their `participant_token`. They can
+also send `{"type":"ready","ready":true}` on their room WebSocket. The Host's
+start request returns `409` until Player 2 is ready. Joining a room that has
+started is allowed only as a spectator when spectators are enabled.
 The public lobby can also join by numeric room code with
 `POST /api/v1/rooms/join` and `{"room_code":"42"}`.
+Clients using the lobby WebSocket can instead send
+`{"type":"join_room","room_id":42}`. The socket responds with `room.joined`
+and the assigned role plus participant token; use that token to connect to the
+room WebSocket.
 
 The host can email an invitation with `POST /api/v1/rooms/{room_id}/invite`:
 

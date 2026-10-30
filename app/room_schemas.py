@@ -62,6 +62,12 @@ class RoomActionRequest(BaseModel):
     participant_token: str = Field(min_length=32, max_length=128)
 
 
+class RoomReadyRequest(RoomActionRequest):
+    """Player two's ready state while the room is waiting."""
+
+    ready: bool = True
+
+
 class RoomInviteRequest(RoomActionRequest):
     """Host credentials and recipient address for a direct email invitation."""
 
@@ -81,6 +87,7 @@ class RoomSummary(BaseModel):
     is_public: bool
     has_password: bool
     allow_spectators: bool
+    player2_ready: bool
     status: Literal["waiting", "playing", "finished"]
     player_count: int
     spectator_count: int

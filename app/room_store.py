@@ -36,6 +36,7 @@ if status == 'waiting' then
     local player2_token = redis.call('HGET', KEYS[1], 'player2_token')
     if not player2_token or player2_token == '' then
         redis.call('HSET', KEYS[1], 'player2_token', ARGV[1])
+        redis.call('HSET', KEYS[1], 'player2_ready', 'false')
         redis.call('HSET', KEYS[2], ARGV[1], 'player2')
         return 'player2'
     end
@@ -46,6 +47,21 @@ end
 redis.call('HSET', KEYS[2], ARGV[1], 'spectator')
 redis.call('SADD', KEYS[3], ARGV[1])
 return 'spectator'
+"""
+
+_SET_PLAYER_READY_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return -1
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'waiting' then
+    return -3
+end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= 'player2'
+    or redis.call('HGET', KEYS[1], 'player2_token') ~= ARGV[1] then
+    return -2
+end
+redis.call('HSET', KEYS[1], 'player2_ready', ARGV[2])
+return 1
 """
 
 _START_ROOM_SCRIPT = """
@@ -61,6 +77,9 @@ end
 local player2_token = redis.call('HGET', KEYS[1], 'player2_token')
 if not player2_token or player2_token == '' then
     return -4
+end
+if redis.call('HGET', KEYS[1], 'player2_ready') ~= 'true' then
+    return -5
 end
 local timer_seconds = tonumber(redis.call('HGET', KEYS[1], 'timer_seconds') or '30')
 local redis_time = redis.call('TIME')
@@ -202,6 +221,7 @@ if role == 'player1' then
 end
 if role == 'player2' and status == 'waiting' then
     redis.call('HSET', KEYS[1], 'player2_token', '')
+    redis.call('HSET', KEYS[1], 'player2_ready', 'false')
     redis.call('HSET', KEYS[1], 'player2_connected', 'false')
     redis.call('HDEL', KEYS[2], ARGV[1])
     return 1
@@ -220,7 +240,10 @@ if role == 'player2' and status == 'playing' then
     return 5
 end
 if role == 'player2' then
-    redis.call('HSET', KEYS[1], 'player2_token', '', 'player2_connected', 'false')
+    redis.call('HSET', KEYS[1],
+        'player2_token', '',
+        'player2_ready', 'false',
+        'player2_connected', 'false')
 end
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('SREM', KEYS[3], ARGV[1])
@@ -248,6 +271,7 @@ if role == 'player1' and status == 'finished' then
 end
 if role == 'player2' and status == 'waiting' then
     redis.call('HSET', KEYS[1], 'player2_token', '', 'player2_connected', 'false')
+    redis.call('HSET', KEYS[1], 'player2_ready', 'false')
     redis.call('HDEL', KEYS[2], ARGV[1])
     return {1, role, 0, 0}
 end
@@ -255,6 +279,7 @@ if role == 'player1' or role == 'player2' then
     if status ~= 'playing' then
         if role == 'player2' then
             redis.call('HSET', KEYS[1], 'player2_token', '', 'player2_connected', 'false')
+            redis.call('HSET', KEYS[1], 'player2_ready', 'false')
         end
         redis.call('HDEL', KEYS[2], ARGV[1])
         return {1, role, 0, 0}
@@ -464,6 +489,7 @@ def create_room(
             "is_public": "true" if is_public else "false",
             "password_hash": password_hash or "",
             "allow_spectators": "true" if allow_spectators else "false",
+            "player2_ready": "false",
             "status": "waiting",
             "host_token": host_token,
             "invite_token": invite_token,
@@ -542,6 +568,7 @@ def get_room(room_id: int) -> dict[str, Any] | None:
         "is_public": is_public,
         "has_password": bool(values.get("password_hash")),
         "allow_spectators": values.get("allow_spectators", "true") != "false",
+        "player2_ready": values.get("player2_ready", "false") == "true",
         "status": values["status"],
         "player_count": player_count,
         "spectator_count": int(redis_client.scard(_spectators_key(room_id))),
@@ -570,7 +597,7 @@ def list_public_rooms(limit: int = 100) -> list[dict[str, Any]]:
 
 
 def join_room(room_id: int, participant_token: str) -> str | None:
-    """Assign the next lobby joiner player two; later joins become spectators."""
+    """Atomically assign player two or a spectator role to a joining token."""
     result = redis_client.eval(
         _JOIN_ROOM_SCRIPT,
         3,
@@ -584,6 +611,24 @@ def join_room(room_id: int, participant_token: str) -> str | None:
     if result == -2:
         return "spectators_disabled"
     return str(result)
+
+
+def set_player_ready(room_id: int, participant_token: str, ready: bool = True) -> int:
+    """Atomically change player two's ready state while a room is waiting.
+
+    Returns 1 on success, -1 for a missing room, -2 for a non-player-two token,
+    and -3 when the room is no longer waiting.
+    """
+    return int(
+        redis_client.eval(
+            _SET_PLAYER_READY_SCRIPT,
+            2,
+            _room_key(room_id),
+            _participants_key(room_id),
+            participant_token,
+            "true" if ready else "false",
+        )
+    )
 
 
 def get_participant_role(room_id: int, participant_token: str) -> str | None:

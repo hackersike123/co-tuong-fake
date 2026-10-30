@@ -1,5 +1,6 @@
 """Integration test for room lifecycle against the configured Redis server."""
 
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
@@ -46,6 +47,7 @@ def test_public_room_lifecycle_uses_configured_redis(
         assert room_store.list_public_rooms()[0]["id"] == room_id
 
         assert room_store.join_room(room_id, "opponent-token") == "player2"
+        assert room_store.set_player_ready(room_id, "opponent-token") == 1
         assert room_store.join_room(room_id, "spectator-token") == "spectator"
         assert room_store.get_room(room_id)["player_count"] == 2
         assert room_store.get_room(room_id)["spectator_count"] == 1
@@ -85,6 +87,22 @@ def test_public_room_lifecycle_uses_configured_redis(
         )
         assert room_store.get_room(private_room_id)["spectator_count"] == 0
         assert room_store.delete_room(private_room_id)
+
+        race_room, _ = room_store.create_room("Concurrent joins")
+        race_room_id = race_room["id"]
+        tokens = [f"concurrent-token-{index}" for index in range(8)]
+        with ThreadPoolExecutor(max_workers=len(tokens)) as executor:
+            roles = list(
+                executor.map(
+                    lambda token: room_store.join_room(race_room_id, token),
+                    tokens,
+                )
+            )
+        assert roles.count("player2") == 1
+        assert roles.count("spectator") == len(tokens) - 1
+        assert room_store.get_room(race_room_id)["player_count"] == 2
+        assert room_store.get_room(race_room_id)["spectator_count"] == len(tokens) - 1
+        assert room_store.delete_room(race_room_id)
     finally:
         for key in room_store.redis_client.scan_iter(match=f"{prefix}:*"):
             room_store.redis_client.delete(key)
@@ -118,6 +136,7 @@ def test_reconnect_grace_period_and_forfeit_use_redis_server_time(
         room, host_token = room_store.create_room("Reconnect integration")
         room_id = room["id"]
         assert room_store.join_room(room_id, "opponent-token") == "player2"
+        assert room_store.set_player_ready(room_id, "opponent-token") == 1
         assert room_store.start_room(room_id, host_token) == 1
 
         dropped = room_store.mark_player_disconnected(room_id, host_token)
@@ -183,6 +202,7 @@ def test_timer_lease_allows_only_one_worker_to_broadcast(
         room, host_token = room_store.create_room("Timer lease integration")
         room_id = room["id"]
         assert room_store.join_room(room_id, "opponent-token") == "player2"
+        assert room_store.set_player_ready(room_id, "opponent-token") == 1
         assert room_store.start_room(room_id, host_token) == 1
 
         assert room_store.acquire_room_timer_lease(room_id, "worker-a") is True
@@ -223,6 +243,7 @@ def test_live_game_moves_and_timeout_use_redis_server_state(
         room, host_token = room_store.create_room("Timer integration", timer_seconds=15)
         room_id = room["id"]
         assert room_store.join_room(room_id, "opponent-token") == "player2"
+        assert room_store.set_player_ready(room_id, "opponent-token") == 1
         assert room_store.start_room(room_id, host_token) == 1
 
         initial_snapshot = room_store.get_game_snapshot(room_id)

@@ -46,6 +46,14 @@
       .room-code { color: #b07c29; font-size: 12px; font-weight: 800; letter-spacing: .1em; }
       .room-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
       .chip { padding: 7px 9px; border-radius: 999px; background: #f1eee5; color: #52635b; font-size: 12px; }
+      .room-join { width: 100%; margin-top: 18px; }
+      .room-panel { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin: -24px 0 56px; padding: 22px; border: 1px solid #d8d3c7; border-radius: 18px; background: #fffdf8; box-shadow: 0 12px 32px #253c2c0b; }
+      .room-panel[hidden] { display: none; }
+      .room-panel h2 { margin: 0; font-size: 27px; }
+      .room-panel p { margin: 7px 0 0; color: #718078; font-size: 13px; }
+      .room-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+      .room-controls button[hidden] { display: none; }
+      .room-error { flex-basis: 100%; margin: 0; color: #a63e32; font-size: 12px; text-align: right; }
       .empty { grid-column: 1 / -1; padding: 30px; border: 1px dashed #cfc9bb; border-radius: 18px; color: #718078; text-align: center; }
       dialog { width: min(590px, calc(100% - 28px)); max-height: min(90vh, 820px); padding: 0; overflow: auto; border: 1px solid #e5dfd1; border-radius: 24px; background: #fffdf8; color: #18312a; box-shadow: 0 30px 90px #102b2555; }
       dialog::backdrop { background: #0e211bcc; backdrop-filter: blur(5px); }
@@ -86,6 +94,9 @@
         .page { width: min(100% - 28px, 520px); padding-top: 24px; }
         .hero { grid-template-columns: 1fr; margin: 58px 0 42px; }
         .hero .primary { width: 100%; }
+        .room-panel { align-items: stretch; flex-direction: column; margin-top: -8px; }
+        .room-controls { align-items: stretch; flex-direction: column; }
+        .room-error { text-align: left; }
         .dialog-body { padding: 23px 19px; }
         .topbar .muted { display: none; }
       }
@@ -115,6 +126,16 @@
         <div class="room-list" id="room-list" aria-live="polite"><div class="empty">Đang tải danh sách phòng…</div></div>
       </section>
     </main>
+
+    <section class="page room-panel" id="room-panel" aria-live="polite" hidden>
+      <div><p class="eyebrow">Vai trò trong phòng</p><h2 id="room-panel-title"></h2><p id="room-panel-state"></p></div>
+      <div class="room-controls">
+        <button class="secondary" id="room-ready" type="button" hidden>Sẵn sàng</button>
+        <button class="primary" id="room-start" type="button" hidden disabled>Bắt đầu</button>
+        <button class="secondary" id="room-leave" type="button">Rời phòng</button>
+        <p class="room-error" id="room-error" role="alert"></p>
+      </div>
+    </section>
 
     <dialog id="create-dialog" aria-labelledby="create-title">
       <form class="dialog-body" id="create-form">
@@ -153,7 +174,7 @@
         <p class="result-label">Mã định danh duy nhất</p><div class="result-value" id="created-uuid"></div>
         <p class="result-label">Link mời</p><div class="result-value" id="created-link"></div><button class="copy-button" data-copy="created-link" type="button">Sao chép link</button>
         <p class="result-label">Mã chủ phòng · giữ riêng tư</p><div class="result-value" id="created-token"></div><button class="copy-button" data-copy="created-token" type="button">Sao chép mã chủ phòng</button>
-        <div class="actions"><button class="primary" id="done-result" type="button">Hoàn tất</button></div>
+        <div class="actions"><button class="secondary" id="open-created-room" type="button">Mở phòng</button><button class="primary" id="done-result" type="button">Hoàn tất</button></div>
       </div>
     </dialog>
 
@@ -167,6 +188,15 @@
       const createError = document.querySelector("#create-error");
       const submitButton = document.querySelector("#submit-create");
       const toast = document.querySelector("#toast");
+      const roomPanel = document.querySelector("#room-panel");
+      const roomPanelTitle = document.querySelector("#room-panel-title");
+      const roomPanelState = document.querySelector("#room-panel-state");
+      const roomError = document.querySelector("#room-error");
+      const readyButton = document.querySelector("#room-ready");
+      const startButton = document.querySelector("#room-start");
+      let createdRoomAccess = null;
+      let activeRoomAccess = null;
+      let activeRoomSocket = null;
 
       function showToast(message) {
         toast.textContent = message;
@@ -203,7 +233,12 @@
         meta.append(makeChip(`${room.player_count}/2 người chơi`));
         meta.append(makeChip(room.has_password ? "Có mật khẩu" : "Không mật khẩu"));
         meta.append(makeChip(room.allow_spectators ? "Có khán giả" : "Không khán giả"));
-        card.append(heading, meta);
+        const joinButton = document.createElement("button");
+        joinButton.className = "secondary room-join";
+        joinButton.type = "button";
+        joinButton.textContent = "Vào phòng";
+        joinButton.addEventListener("click", () => joinPublicRoom(room.id, room.has_password));
+        card.append(heading, meta, joinButton);
         return card;
       }
 
@@ -232,6 +267,108 @@
         }
       }
 
+      function updateRoomPanel(room) {
+        if (!activeRoomAccess || !room) return;
+        activeRoomAccess = { ...activeRoomAccess, ...room };
+        const roleLabels = {
+          player1: "Chủ phòng · Đỏ",
+          player2: "Đối thủ · Đen",
+          spectator: "Khán giả",
+        };
+        const roleLabel = roleLabels[activeRoomAccess.role] || activeRoomAccess.role;
+        const ready = Boolean(activeRoomAccess.player2_ready);
+        const waiting = activeRoomAccess.status === "waiting";
+        const opponentJoined = activeRoomAccess.player_count > 1;
+        roomPanelTitle.textContent = `${activeRoomAccess.room_name || activeRoomAccess.name} · #${activeRoomAccess.room_id || activeRoomAccess.id}`;
+        roomPanelState.textContent = waiting
+          ? `${roleLabel} · ${!opponentJoined ? "Đang chờ Player 2 vào phòng" : ready ? "Player 2 đã sẵn sàng" : "Đang chờ Player 2 sẵn sàng"}`
+          : `${roleLabel} · ${activeRoomAccess.status === "playing" ? "Ván đấu đang diễn ra" : "Phòng đã kết thúc"}`;
+        readyButton.hidden = activeRoomAccess.role !== "player2" || !waiting;
+        readyButton.textContent = ready ? "Hủy sẵn sàng" : "Sẵn sàng";
+        startButton.hidden = activeRoomAccess.role !== "player1" || !waiting;
+        startButton.disabled = !ready;
+        startButton.title = ready ? "Bắt đầu ván đấu" : "Đang chờ Player 2 sẵn sàng";
+      }
+
+      function openRoom(access) {
+        if (activeRoomSocket && activeRoomSocket.readyState < WebSocket.CLOSING) {
+          showToast("Hãy rời phòng hiện tại trước khi vào phòng khác.");
+          return;
+        }
+        createdRoomAccess = access;
+        activeRoomAccess = access;
+        roomError.textContent = "";
+        roomPanel.hidden = false;
+        updateRoomPanel(access);
+        roomPanel.scrollIntoView({ behavior: "smooth", block: "center" });
+
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const socketUrl = `${protocol}//${window.location.host}/api/v1/rooms/${access.room_id || access.id}/ws?participant_token=${encodeURIComponent(access.participant_token)}`;
+        activeRoomSocket = new WebSocket(socketUrl);
+        activeRoomSocket.addEventListener("message", (message) => {
+          let event;
+          try { event = JSON.parse(message.data); } catch { return; }
+          if (event.room) updateRoomPanel({ ...event.room, role: activeRoomAccess.role });
+          if (event.type === "room.snapshot") updateRoomPanel({ ...event.room, role: event.role });
+          if (event.type === "error") roomError.textContent = event.reason || "Yêu cầu không hợp lệ.";
+          if (event.type === "room.closed") {
+            roomPanelState.textContent = "Phòng đã đóng.";
+            readyButton.hidden = true;
+            startButton.hidden = true;
+          }
+          if (["room.participant_joined", "player.ready", "room.started"].includes(event.type)) {
+            loadRooms();
+          }
+        });
+        activeRoomSocket.addEventListener("close", () => {
+          if (activeRoomAccess) roomPanelState.textContent += " · Mất kết nối socket";
+        });
+      }
+
+      async function joinPublicRoom(roomId, hasPassword) {
+        let password = null;
+        if (hasPassword) {
+          password = window.prompt("Nhập mật khẩu phòng:");
+          if (password === null) return;
+        }
+        try {
+          const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+          const socket = new WebSocket(`${protocol}//${window.location.host}/api/v1/rooms/ws`);
+          const access = await new Promise((resolve, reject) => {
+            const timeout = window.setTimeout(() => {
+              socket.close();
+              reject(new Error("Hết thời gian chờ phản hồi từ sảnh."));
+            }, 10000);
+            socket.addEventListener("open", () => {
+              const request = { type: "join_room", room_id: roomId };
+              if (password !== null) request.password = password;
+              socket.send(JSON.stringify(request));
+            }, { once: true });
+            socket.addEventListener("message", (message) => {
+              let event;
+              try { event = JSON.parse(message.data); } catch { return; }
+              if (event.type === "room.joined") {
+                window.clearTimeout(timeout);
+                socket.close();
+                resolve(event.access);
+              } else if (event.type === "error") {
+                window.clearTimeout(timeout);
+                socket.close();
+                reject(new Error(event.reason || "Không thể vào phòng."));
+              }
+            });
+            socket.addEventListener("error", () => {
+              window.clearTimeout(timeout);
+              reject(new Error("Không thể kết nối đến sảnh."));
+            }, { once: true });
+          });
+          openRoom(access);
+          await loadRooms();
+        } catch (error) {
+          showToast(error.message);
+        }
+      }
+
       document.querySelector("#open-create").addEventListener("click", () => {
         createError.textContent = "";
         createDialog.showModal();
@@ -243,7 +380,63 @@
       ["#close-result", "#done-result"].forEach((selector) => {
         document.querySelector(selector).addEventListener("click", () => resultDialog.close());
       });
+      document.querySelector("#open-created-room").addEventListener("click", () => {
+        if (!createdRoomAccess) return;
+        resultDialog.close();
+        openRoom(createdRoomAccess);
+      });
       document.querySelector("#refresh-rooms").addEventListener("click", loadRooms);
+
+      readyButton.addEventListener("click", () => {
+        if (!activeRoomAccess || !activeRoomSocket || activeRoomSocket.readyState !== WebSocket.OPEN) {
+          roomError.textContent = "Đang kết nối lại với phòng…";
+          return;
+        }
+        roomError.textContent = "";
+        activeRoomSocket.send(JSON.stringify({
+          type: "ready",
+          ready: !activeRoomAccess.player2_ready,
+        }));
+      });
+
+      startButton.addEventListener("click", async () => {
+        if (!activeRoomAccess || startButton.disabled) return;
+        startButton.disabled = true;
+        try {
+          const response = await fetch(`/api/v1/rooms/${activeRoomAccess.room_id || activeRoomAccess.id}/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ participant_token: activeRoomAccess.participant_token }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.detail || "Không thể bắt đầu ván đấu.");
+          updateRoomPanel({ ...result, role: activeRoomAccess.role });
+          await loadRooms();
+        } catch (error) {
+          roomError.textContent = error.message;
+          startButton.disabled = false;
+        }
+      });
+
+      document.querySelector("#room-leave").addEventListener("click", async () => {
+        if (!activeRoomAccess) return;
+        try {
+          const response = await fetch(`/api/v1/rooms/${activeRoomAccess.room_id || activeRoomAccess.id}/leave`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ participant_token: activeRoomAccess.participant_token }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.detail || "Không thể rời phòng.");
+          activeRoomSocket?.close();
+          activeRoomSocket = null;
+          activeRoomAccess = null;
+          roomPanel.hidden = true;
+          await loadRooms();
+        } catch (error) {
+          roomError.textContent = error.message;
+        }
+      });
 
       createForm.addEventListener("submit", async (event) => {
         event.preventDefault();
@@ -271,6 +464,7 @@
             const detail = result.detail;
             throw new Error(Array.isArray(detail) ? detail.map((item) => item.msg).join("; ") : detail || "Không thể tạo phòng.");
           }
+          createdRoomAccess = result;
           document.querySelector("#created-id").textContent = String(result.room_id || result.id);
           document.querySelector("#created-uuid").textContent = result.room_uuid;
           document.querySelector("#created-link").textContent = result.join_url;
