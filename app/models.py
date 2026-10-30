@@ -61,6 +61,10 @@ class Match(Base):
     winner: Mapped[str | None] = mapped_column(String(1))
     notation: Mapped[str] = mapped_column(Text, nullable=False, default="")
     final_fen: Mapped[str] = mapped_column(Text, nullable=False)
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    has_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    allow_spectators: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    access_token_hashes: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     finished_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
