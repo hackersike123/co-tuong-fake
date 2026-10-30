@@ -226,25 +226,53 @@ Reset the password with `POST /api/v1/auth/reset-password`:
 The new password and confirmation must match and be 8–128 characters. A reset
 code can be used once; five wrong codes invalidate it.
 
-## Public rooms
+## Rooms and lobby
 
-Create a public room with `POST /api/v1/rooms/`:
+Create a room with `POST /api/v1/rooms/`:
 
 ```json
 {
-  "name": "Ván cờ cuối tuần",
+  "room_name": "Weekend Xiangqi",
   "host_name": "Minh Anh",
-  "timer_seconds": 30
+  "time_per_move": 30,
+  "is_public": true,
+  "password": null,
+  "allow_spectators": true
 }
 ```
 
-The response returns an auto-incremented room ID, a shareable `join_url`,
-the creator's `player1` role, and a secret `participant_token`. Store the token
-privately; it authorizes room actions. Set `PUBLIC_APP_URL` to the public web
-app origin so generated invitation links point to the deployed app. Room
-actions still use this participant token; account login is not yet wired into
-room authorization. `host_name` is optional and defaults to `Khách`.
-`timer_seconds` accepts 15, 30, or 60; it sets each player's initial clock.
+`room_name` is required. `host_name` is optional and defaults to `Khách`.
+`time_per_move` accepts 15, 30, or 60 seconds and sets each player's initial
+clock. The legacy fields `name` and `timer_seconds` are also accepted.
+The local room-creation modal and public lobby demo are available at
+`/demo/rooms` while the API server is running.
+
+The response includes an auto-incremented numeric `room_id` (also returned as
+the legacy `id`) and a unique `room_uuid`, plus the creator's `player1` role
+and secret `participant_token`. Store the
+participant token privately; it authorizes room actions. A room password is
+hashed before it is stored and is never returned by the API. The response only
+includes `has_password`. Public rooms appear in the lobby; private rooms are
+omitted. Rooms with `allow_spectators: false` reject joiners after both player
+slots are filled and reject spectators after a game starts.
+
+The creator is `player1` (Host/Red). The first successful join receives
+`player2` (Black); later joins receive `spectator` when spectators are enabled.
+Redis runs seat assignment as one atomic script, so concurrent joins cannot
+claim the Player 2 slot twice.
+
+Joining a password-protected room requires `password` in the join body, unless
+the client has the room's unguessable invitation token. A private room without
+a password can only be joined with its invitation token. For example:
+
+```json
+{
+  "password": "room-secret"
+}
+```
+
+Set `PUBLIC_APP_URL` to the web app origin so generated invitation links point
+to the deployed app.
 
 The `join_url` has the form `PUBLIC_APP_URL/room/{room_id}?token={invite_token}`.
 The invite token is separate from the host's participant token. The frontend can
@@ -256,10 +284,18 @@ Each lobby row includes the room ID/code, name, host name, creation timestamp,
 player count, and spectator count. Join from the list or from a shared room link
 with `POST /api/v1/rooms/{room_id}/join`
 and `{}` as the body. For a direct link, send its `token` as `invite_token` in
-the join request. The first joiner receives `player2`; later joiners are
-spectators. Joining a room that has started is allowed only as a spectator.
+the join request. If the room has a password, the link token is sufficient;
+otherwise send the room `password`. Player 2 marks ready with
+`POST /api/v1/rooms/{room_id}/ready` and their `participant_token`. They can
+also send `{"type":"ready","ready":true}` on their room WebSocket. The Host's
+start request returns `409` until Player 2 is ready. Joining a room that has
+started is allowed only as a spectator when spectators are enabled.
 The public lobby can also join by numeric room code with
 `POST /api/v1/rooms/join` and `{"room_code":"42"}`.
+Clients using the lobby WebSocket can instead send
+`{"type":"join_room","room_id":42}`. The socket responds with `room.joined`
+and the assigned role plus participant token; use that token to connect to the
+room WebSocket.
 
 The host can email an invitation with `POST /api/v1/rooms/{room_id}/invite`:
 

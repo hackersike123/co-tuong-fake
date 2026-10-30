@@ -2,10 +2,11 @@
 
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from redis.exceptions import RedisError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -47,6 +48,13 @@ app = FastAPI(title="Co Tuong API", version="0.1.0", lifespan=lifespan)
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["accounts"])
 app.include_router(rooms_router, prefix="/api/v1/rooms", tags=["rooms"])
 app.include_router(pve_router, prefix="/api/v1/pve", tags=["single-player"])
+
+
+@app.get("/demo/rooms", include_in_schema=False)
+def room_lobby_demo() -> FileResponse:
+    """Serve the lightweight room-creation modal for local demonstrations."""
+    demo_path = Path(__file__).parent / "static" / "room_lobby.html"
+    return FileResponse(demo_path, media_type="text/html; charset=utf-8")
 
 
 @app.get("/health", tags=["health"], include_in_schema=False)

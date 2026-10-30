@@ -5,7 +5,7 @@ import secrets
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
@@ -16,6 +16,7 @@ from ..email_service import (
     send_room_invitation_email,
 )
 from ..room_hub import room_hub
+from ..room_access import authorize_room_access
 from ..room_schemas import (
     RoomAccessResponse,
     RoomActionRequest,
@@ -25,6 +26,7 @@ from ..room_schemas import (
     RoomInviteResponse,
     RoomGameSnapshot,
     RoomJoinRequest,
+    RoomReadyRequest,
     RoomLeaveResponse,
     RoomMoveRequest,
     RoomSummary,
@@ -34,6 +36,7 @@ from ..room_store import (
     apply_game_move,
     get_participant_role,
     get_room,
+    get_room_password_hash,
     get_game_snapshot,
     get_or_create_invite_token,
     is_valid_invite_token,
@@ -42,8 +45,10 @@ from ..room_store import (
     list_public_rooms,
     mark_player_disconnected,
     mark_player_reconnected,
+    set_player_ready,
     start_room,
 )
+from ..security import hash_password, verify_password
 from ..settings import PUBLIC_APP_URL
 from ..xiangqi import (
     GameStatus,
@@ -107,6 +112,37 @@ def _room_summary(room_id: int) -> dict[str, Any] | None:
     except RedisError as exc:
         logger.exception("Could not read room %s from Redis", room_id)
         raise _service_unavailable() from exc
+
+
+def _update_player_ready(
+    room_id: int,
+    participant_token: str,
+    ready: bool,
+) -> dict[str, Any]:
+    """Set player two's readiness, preserving Redis-backed role validation."""
+    try:
+        result = set_player_ready(room_id, participant_token, ready)
+    except RedisError as exc:
+        logger.exception("Could not update ready state for room %s", room_id)
+        raise _service_unavailable() from exc
+
+    if result == -1:
+        raise _room_not_found()
+    if result == -2:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only player two can change the ready state",
+        )
+    if result == -3:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The room is no longer waiting",
+        )
+
+    room = _room_summary(room_id)
+    if room is None:
+        raise _room_not_found()
+    return room
 
 
 def _process_room_move(
@@ -198,27 +234,32 @@ def _process_room_move(
     "/",
     response_model=RoomAccessResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create a public room",
+    summary="Create a public or private room",
 )
 def create_public_room(
     payload: RoomCreateRequest,
     background_tasks: BackgroundTasks,
 ) -> RoomAccessResponse:
-    """Create a public lobby room and assign its creator player one."""
+    """Create a room and assign its creator player one."""
+    password_hash = hash_password(payload.password) if payload.password is not None else None
     try:
         room, host_token = create_room(
-            payload.name,
+            payload.room_name,
             payload.host_name,
-            payload.timer_seconds,
+            payload.time_per_move,
+            is_public=payload.is_public,
+            password_hash=password_hash,
+            allow_spectators=payload.allow_spectators,
         )
     except RedisError as exc:
         logger.exception("Could not create a room in Redis")
         raise _service_unavailable() from exc
 
-    background_tasks.add_task(
-        room_hub.broadcast_lobby,
-        {"type": "room.created", "room": room},
-    )
+    if room["is_public"]:
+        background_tasks.add_task(
+            room_hub.broadcast_lobby,
+            {"type": "room.created", "room": room},
+        )
     return _access_response(room, "player1", host_token)
 
 
@@ -246,6 +287,7 @@ def _join_room_response(
     if room is None:
         raise _room_not_found()
 
+    valid_invite = False
     if payload.invite_token is not None:
         try:
             valid_invite = is_valid_invite_token(room_id, payload.invite_token)
@@ -254,6 +296,40 @@ def _join_room_response(
             raise _service_unavailable() from exc
         if not valid_invite:
             raise HTTPException(status_code=403, detail="The room invitation link is invalid")
+
+    existing_participant = False
+    if (
+        (room["has_password"] or not room["is_public"])
+        and not valid_invite
+        and payload.participant_token is not None
+    ):
+        try:
+            existing_participant = (
+                get_participant_role(room_id, payload.participant_token) is not None
+            )
+        except RedisError as exc:
+            logger.exception("Could not validate room participant for room %s", room_id)
+            raise _service_unavailable() from exc
+
+    if (
+        (room["has_password"] or not room["is_public"])
+        and not valid_invite
+        and not existing_participant
+    ):
+        try:
+            password_hash = get_room_password_hash(room_id)
+        except RedisError as exc:
+            logger.exception("Could not load room password for room %s", room_id)
+            raise _service_unavailable() from exc
+        if (
+            payload.password is None
+            or password_hash is None
+            or not verify_password(payload.password, password_hash)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="A valid room password or invitation link is required",
+            )
 
     participant_token = payload.participant_token or secrets.token_urlsafe(32)
     try:
@@ -264,6 +340,11 @@ def _join_room_response(
 
     if role is None:
         raise _room_not_found()
+    if role == "spectators_disabled":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Spectators are not allowed in this room",
+        )
 
     room = _room_summary(room_id)
     if room is None:
@@ -274,7 +355,7 @@ def _join_room_response(
         room_id,
         {"type": "room.participant_joined", "role": role, "room": room},
     )
-    if room["status"] == "waiting":
+    if room["is_public"] and room["status"] == "waiting":
         background_tasks.add_task(
             room_hub.broadcast_lobby,
             {"type": "room.updated", "room": room},
@@ -285,7 +366,7 @@ def _join_room_response(
 @router.post(
     "/join",
     response_model=RoomAccessResponse,
-    summary="Join a public room using its numeric room code",
+    summary="Join a room using its numeric room code",
 )
 def join_room_by_code(
     payload: RoomCodeJoinRequest,
@@ -297,6 +378,7 @@ def join_room_by_code(
         RoomJoinRequest(
             participant_token=payload.participant_token,
             invite_token=payload.invite_token,
+            password=payload.password,
         ),
         background_tasks,
     )
@@ -307,11 +389,27 @@ def join_room_by_code(
     response_model=RoomSummary,
     summary="Get room details by shareable room ID",
 )
-def get_room_details(room_id: int) -> RoomSummary:
+def get_room_details(
+    room_id: int,
+    participant_token: str | None = Header(default=None, alias="X-Room-Participant-Token"),
+    invite_token: str | None = Header(default=None, alias="X-Room-Invite-Token"),
+    password: str | None = Header(default=None, alias="X-Room-Password"),
+) -> RoomSummary:
     """Return a room's public details for a direct invitation link."""
     room = _room_summary(room_id)
     if room is None:
         raise _room_not_found()
+    try:
+        authorize_room_access(
+            room,
+            "read_room",
+            participant_token=participant_token,
+            invite_token=invite_token,
+            password=password,
+        )
+    except RedisError as exc:
+        logger.exception("Could not validate read access for room %s", room_id)
+        raise _service_unavailable() from exc
     return RoomSummary(**room)
 
 
@@ -320,11 +418,27 @@ def get_room_details(room_id: int) -> RoomSummary:
     response_model=RoomGameSnapshot,
     summary="Get the current server-authoritative board and clocks",
 )
-def get_room_game_state(room_id: int) -> RoomGameSnapshot:
+def get_room_game_state(
+    room_id: int,
+    participant_token: str | None = Header(default=None, alias="X-Room-Participant-Token"),
+    invite_token: str | None = Header(default=None, alias="X-Room-Invite-Token"),
+    password: str | None = Header(default=None, alias="X-Room-Password"),
+) -> RoomGameSnapshot:
     """Return the current FEN, side to move, version, and remaining clocks."""
     room = _room_summary(room_id)
     if room is None:
         raise _room_not_found()
+    try:
+        authorize_room_access(
+            room,
+            "read_game_state",
+            participant_token=participant_token,
+            invite_token=invite_token,
+            password=password,
+        )
+    except RedisError as exc:
+        logger.exception("Could not validate game-state access for room %s", room_id)
+        raise _service_unavailable() from exc
     if room["status"] == "waiting":
         raise HTTPException(status_code=409, detail="The game has not started")
     try:
@@ -349,6 +463,33 @@ def join_public_room(
 ) -> RoomAccessResponse:
     """Assign the second player slot or make the joiner a spectator."""
     return _join_room_response(room_id, payload, background_tasks)
+
+
+@router.post(
+    "/{room_id}/ready",
+    response_model=RoomSummary,
+    summary="Set player two's ready state",
+)
+def ready_room_player(
+    room_id: int,
+    payload: RoomReadyRequest,
+    background_tasks: BackgroundTasks,
+) -> RoomSummary:
+    """Let only player two change readiness before the host starts the game."""
+    room = _update_player_ready(room_id, payload.participant_token, payload.ready)
+    event = {
+        "type": "player.ready",
+        "room": room,
+        "role": "player2",
+        "ready": payload.ready,
+    }
+    background_tasks.add_task(room_hub.broadcast_room, room_id, event)
+    if room["is_public"]:
+        background_tasks.add_task(
+            room_hub.broadcast_lobby,
+            {"type": "room.updated", "room": room},
+        )
+    return RoomSummary(**room)
 
 
 @router.post(
@@ -440,6 +581,11 @@ def start_public_room(
         raise HTTPException(status_code=409, detail="The room has already started")
     if result == -4:
         raise HTTPException(status_code=409, detail="An opponent must join before the game starts")
+    if result == -5:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Player two must be ready before the game starts",
+        )
 
     room = _room_summary(room_id)
     if room is None:
@@ -454,10 +600,11 @@ def start_public_room(
         raise HTTPException(status_code=503, detail="The game state was not initialized")
 
     background_tasks.add_task(room_hub.ensure_timer, room_id)
-    background_tasks.add_task(
-        room_hub.broadcast_lobby,
-        {"type": "room.removed", "room_id": room_id, "reason": "started"},
-    )
+    if room["is_public"]:
+        background_tasks.add_task(
+            room_hub.broadcast_lobby,
+            {"type": "room.removed", "room_id": room_id, "reason": "started"},
+        )
     background_tasks.add_task(
         room_hub.broadcast_room,
         room_id,
@@ -477,6 +624,7 @@ def leave_public_room(
     background_tasks: BackgroundTasks,
 ) -> RoomLeaveResponse:
     """Delete the room when its host leaves; otherwise remove or disconnect the participant."""
+    room_before_leave = _room_summary(room_id)
     try:
         result = leave_room(room_id, payload.participant_token)
     except RedisError as exc:
@@ -489,9 +637,15 @@ def leave_public_room(
         raise HTTPException(status_code=403, detail="The participant token is not valid for this room")
     if result == 2:
         background_tasks.add_task(room_hub.stop_room_timers, room_id)
+        if room_before_leave is not None and room_before_leave["is_public"]:
+            background_tasks.add_task(
+                room_hub.broadcast_lobby,
+                {"type": "room.removed", "room_id": room_id, "reason": "host_left"},
+            )
         background_tasks.add_task(
-            room_hub.broadcast_lobby,
-            {"type": "room.removed", "room_id": room_id, "reason": "host_left"},
+            room_hub.revoke_participant,
+            room_id,
+            payload.participant_token,
         )
         background_tasks.add_task(
             room_hub.broadcast_room,
@@ -517,12 +671,22 @@ def leave_public_room(
             "game": game,
         }
         if result == 4:
-            background_tasks.add_task(room_hub.close_after_forfeit, room_id, event)
+            background_tasks.add_task(
+                room_hub.close_after_forfeit,
+                room_id,
+                event,
+                payload.participant_token,
+            )
             return RoomLeaveResponse(
                 message="Host forfeited; room closed",
                 room_deleted=True,
             )
-        background_tasks.add_task(room_hub.publish_forfeit, room_id, event)
+        background_tasks.add_task(
+            room_hub.publish_forfeit,
+            room_id,
+            event,
+            payload.participant_token,
+        )
         return RoomLeaveResponse(
             message="Player forfeited; game finished",
             room_deleted=False,
@@ -531,11 +695,16 @@ def leave_public_room(
     room = _room_summary(room_id)
     if room is not None:
         background_tasks.add_task(
+            room_hub.revoke_participant,
+            room_id,
+            payload.participant_token,
+        )
+        background_tasks.add_task(
             room_hub.broadcast_room,
             room_id,
             {"type": "room.participant_left", "room": room},
         )
-        if room["status"] == "waiting":
+        if room["is_public"] and room["status"] == "waiting":
             background_tasks.add_task(
                 room_hub.broadcast_lobby,
                 {"type": "room.updated", "room": room},
@@ -556,6 +725,39 @@ async def public_lobby_socket(websocket: WebSocket) -> None:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
                 await room_hub.send_to_client(websocket, {"type": "pong"})
+            elif isinstance(message, dict) and message.get("type") == "join_room":
+                try:
+                    requested_room_id = message.get("room_id")
+                    if isinstance(requested_room_id, bool) or not isinstance(
+                        requested_room_id, (int, str)
+                    ):
+                        raise ValueError("room_id must be an integer")
+                    room_id = int(requested_room_id)
+                    if room_id <= 0:
+                        raise ValueError("room_id must be positive")
+                    join_payload = RoomJoinRequest.model_validate(message)
+                    background_tasks = BackgroundTasks()
+                    access = _join_room_response(room_id, join_payload, background_tasks)
+                    await background_tasks()
+                except (TypeError, ValueError, ValidationError):
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "error", "status": 422, "reason": "invalid_join_payload"},
+                    )
+                except HTTPException as exc:
+                    await room_hub.send_to_client(
+                        websocket,
+                        {
+                            "type": "error",
+                            "status": exc.status_code,
+                            "reason": exc.detail,
+                        },
+                    )
+                else:
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "room.joined", "access": access.model_dump(mode="json")},
+                    )
     except WebSocketDisconnect:
         pass
     except RedisError:
@@ -642,7 +844,7 @@ async def _handle_room_socket_disconnect(room_id: int, participant_token: str) -
                 room_id,
                 {"type": "room.participant_left", "room": updated_room},
             )
-            if updated_room["status"] == "waiting":
+            if updated_room["is_public"] and updated_room["status"] == "waiting":
                 await room_hub.broadcast_lobby(
                     {"type": "room.updated", "room": updated_room}
                 )
@@ -689,6 +891,13 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             },
         )
         await websocket.close(code=4404, reason="Room or participant token not found")
+        return
+    if role == "spectator" and not room["allow_spectators"]:
+        logger.warning(
+            "Room WebSocket rejected a spectator against room policy",
+            extra={"event": "websocket.auth_failed", "room_id": room_id, "reason": "spectators_disabled"},
+        )
+        await websocket.close(code=4403, reason="Spectators are not allowed in this room")
         return
 
     reconnected = False
@@ -784,6 +993,44 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
                 await room_hub.send_to_client(websocket, {"type": "pong"})
+            elif isinstance(message, dict) and message.get("type") == "ready":
+                ready = message.get("ready", True)
+                if not isinstance(ready, bool):
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "error", "reason": "invalid_ready_payload"},
+                    )
+                    continue
+                try:
+                    updated_room = await run_in_threadpool(
+                        _update_player_ready,
+                        room_id,
+                        participant_token,
+                        ready,
+                    )
+                except HTTPException as exc:
+                    await room_hub.send_to_client(
+                        websocket,
+                        {
+                            "type": "error",
+                            "status": exc.status_code,
+                            "reason": exc.detail,
+                        },
+                    )
+                    continue
+                await room_hub.broadcast_room(
+                    room_id,
+                    {
+                        "type": "player.ready",
+                        "room": updated_room,
+                        "role": "player2",
+                        "ready": ready,
+                    },
+                )
+                if updated_room["is_public"]:
+                    await room_hub.broadcast_lobby(
+                        {"type": "room.updated", "room": updated_room}
+                    )
             elif isinstance(message, dict) and message.get("type") == "make_move":
                 event = await run_in_threadpool(
                     _process_room_move,

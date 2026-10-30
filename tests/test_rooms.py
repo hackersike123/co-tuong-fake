@@ -3,16 +3,19 @@
 from collections.abc import Iterator
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from uuid import UUID
 
 import fakeredis
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from app import email_service, room_store
 from app.email_service import EmailConfigurationError, EmailDeliveryError
 from app.routers import rooms as room_routes
 from app.routers.rooms import router as rooms_router
+from app.security import verify_password
 from app.xiangqi import STARTING_FEN
 
 
@@ -39,6 +42,14 @@ def _receive_socket_event(websocket: Any, event_type: str) -> dict[str, Any]:
     raise AssertionError(f"Did not receive WebSocket event {event_type!r}")
 
 
+def _ready_player_two(client: TestClient, participant_token: str, room_id: int = 1) -> None:
+    response = client.post(
+        f"/api/v1/rooms/{room_id}/ready",
+        json={"participant_token": participant_token, "ready": True},
+    )
+    assert response.status_code == 200, response.text
+
+
 def test_start_initializes_server_authoritative_board_and_clocks(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:
@@ -48,7 +59,8 @@ def test_start_initializes_server_authoritative_board_and_clocks(
         json={"name": "Timed room", "timer_seconds": 15},
     )
     host = created.json()
-    client.post("/api/v1/rooms/1/join", json={})
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
 
     started = client.post(
         "/api/v1/rooms/1/start",
@@ -78,6 +90,7 @@ def test_make_move_is_server_validated_and_broadcast_to_room(
     )
     host = created.json()
     opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
     client.post(
         "/api/v1/rooms/1/start",
         json={"participant_token": host["participant_token"]},
@@ -128,7 +141,8 @@ def test_spectator_cannot_submit_a_move(
 ) -> None:
     client, _ = rooms_client
     host = client.post("/api/v1/rooms/", json={"name": "Spectator move"}).json()
-    client.post("/api/v1/rooms/1/join", json={})
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
     client.post(
         "/api/v1/rooms/1/start",
         json={"participant_token": host["participant_token"]},
@@ -159,7 +173,8 @@ def test_authoritative_timer_finishes_game_when_active_clock_expires(
         json={"name": "Timeout", "timer_seconds": 15},
     )
     host = created.json()
-    client.post("/api/v1/rooms/1/join", json={})
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
     client.post(
         "/api/v1/rooms/1/start",
         json={"participant_token": host["participant_token"]},
@@ -227,6 +242,7 @@ def test_public_room_roles_start_and_host_deletion(
     assert opponent_response.status_code == 200
     assert opponent["role"] == "player2"
     assert opponent["player_count"] == 2
+    _ready_player_two(client, opponent["participant_token"])
 
     spectator_response = client.post("/api/v1/rooms/1/join", json={})
     spectator = spectator_response.json()
@@ -269,6 +285,31 @@ def test_public_room_roles_start_and_host_deletion(
     assert next_room.json()["host_name"] == "Khách"
 
 
+def test_lobby_socket_join_room_event_returns_the_assigned_role(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post("/api/v1/rooms/", json={"room_name": "Socket join"}).json()
+
+    with client.websocket_connect("/api/v1/rooms/ws") as websocket:
+        assert websocket.receive_json()["type"] == "rooms.snapshot"
+        websocket.send_json({"type": "join_room", "room_id": host["room_id"]})
+
+        joined_event = None
+        for _ in range(10):
+            event = websocket.receive_json()
+            if event.get("type") == "room.joined":
+                joined_event = event
+                break
+
+        assert joined_event is not None
+        access = joined_event["access"]
+        assert access["role"] == "player2"
+        assert access["room_id"] == host["room_id"]
+        assert access["participant_token"]
+        assert client.get("/api/v1/rooms/1").json()["player_count"] == 2
+
+
 def test_invitation_link_joins_each_friend_with_a_separate_token(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:
@@ -291,6 +332,386 @@ def test_invitation_link_joins_each_friend_with_a_separate_token(
     assert spectator.json()["role"] == "spectator"
     assert player.json()["participant_token"] != invite_token
     assert spectator.json()["participant_token"] != player.json()["participant_token"]
+
+
+def test_player_two_must_be_ready_before_host_can_start(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post("/api/v1/rooms/", json={"room_name": "Ready room"}).json()
+    player_two = client.post("/api/v1/rooms/1/join", json={}).json()
+    assert host["role"] == "player1"
+    assert player_two["role"] == "player2"
+    assert host["player2_ready"] is False
+
+    host_url = f"/api/v1/rooms/1/ws?participant_token={host['participant_token']}"
+    player_two_url = f"/api/v1/rooms/1/ws?participant_token={player_two['participant_token']}"
+    with client.websocket_connect(host_url) as host_ws:
+        assert host_ws.receive_json()["type"] == "room.snapshot"
+        with client.websocket_connect(player_two_url) as player_two_ws:
+            player_snapshot = player_two_ws.receive_json()
+            assert player_snapshot["type"] == "room.snapshot"
+            assert player_snapshot["role"] == "player2"
+
+            host_ws.send_json({"type": "ready"})
+            host_ready_error = host_ws.receive_json()
+            assert host_ready_error["type"] == "error"
+            assert host_ready_error["status"] == 403
+
+            not_ready_start = client.post(
+                "/api/v1/rooms/1/start",
+                json={"participant_token": host["participant_token"]},
+            )
+            assert not_ready_start.status_code == 409
+            assert not_ready_start.json()["detail"] == (
+                "Player two must be ready before the game starts"
+            )
+
+            player_two_ws.send_json({"type": "ready", "ready": True})
+            ready_event = _receive_socket_event(host_ws, "player.ready")
+            assert ready_event["role"] == "player2"
+            assert ready_event["room"]["player2_ready"] is True
+            assert _receive_socket_event(player_two_ws, "player.ready") == ready_event
+
+            player_two_ws.send_json({"type": "ready", "ready": False})
+            unready_event = _receive_socket_event(host_ws, "player.ready")
+            assert unready_event["ready"] is False
+            assert unready_event["room"]["player2_ready"] is False
+            assert _receive_socket_event(player_two_ws, "player.ready") == unready_event
+
+            ready_response = client.post(
+                "/api/v1/rooms/1/ready",
+                json={"participant_token": player_two["participant_token"]},
+            )
+            assert ready_response.status_code == 200
+            assert ready_response.json()["player2_ready"] is True
+            assert _receive_socket_event(host_ws, "player.ready")["ready"] is True
+            _receive_socket_event(player_two_ws, "player.ready")
+
+            started = client.post(
+                "/api/v1/rooms/1/start",
+                json={"participant_token": host["participant_token"]},
+            )
+            assert started.status_code == 200
+            assert started.json()["status"] == "playing"
+            assert _receive_socket_event(host_ws, "room.started")["type"] == "room.started"
+            assert _receive_socket_event(player_two_ws, "room.started")["type"] == "room.started"
+
+
+def test_player_two_leaving_resets_readiness_for_the_next_opponent(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post("/api/v1/rooms/", json={"room_name": "Ready reset"}).json()
+    first_opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, first_opponent["participant_token"])
+
+    left = client.post(
+        "/api/v1/rooms/1/leave",
+        json={"participant_token": first_opponent["participant_token"]},
+    )
+    assert left.status_code == 200
+    after_leave = client.get("/api/v1/rooms/1").json()
+    assert after_leave["player_count"] == 1
+    assert after_leave["player2_ready"] is False
+
+    next_opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    assert next_opponent["role"] == "player2"
+    assert next_opponent["player2_ready"] is False
+    not_ready_start = client.post(
+        "/api/v1/rooms/1/start",
+        json={"participant_token": host["participant_token"]},
+    )
+    assert not_ready_start.status_code == 409
+
+
+def test_room_creation_accepts_lobby_options_and_generates_unique_ids(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, fake_redis = rooms_client
+    password = "private-room-pass"
+
+    private_room = client.post(
+        "/api/v1/rooms/",
+        json={
+            "room_name": "Private match",
+            "host_name": "Host",
+            "time_per_move": 60,
+            "is_public": False,
+            "password": password,
+            "allow_spectators": False,
+        },
+    )
+    public_room = client.post(
+        "/api/v1/rooms/",
+        json={"name": "Legacy public match", "timer_seconds": 15},
+    )
+
+    assert private_room.status_code == 201
+    assert public_room.status_code == 201
+    private_data = private_room.json()
+    public_data = public_room.json()
+    assert private_data["room_id"] == private_data["id"] == 1
+    assert public_data["room_id"] == public_data["id"] == 2
+    assert private_data["room_uuid"] != public_data["room_uuid"]
+    assert len(private_data["room_uuid"]) == 32
+    assert UUID(hex=private_data["room_uuid"]).hex == private_data["room_uuid"]
+    assert private_data["room_name"] == "Private match"
+    assert private_data["time_per_move"] == 60
+    assert private_data["visibility"] == "private"
+    assert private_data["is_public"] is False
+    assert private_data["has_password"] is True
+    assert private_data["allow_spectators"] is False
+    assert "password" not in private_data
+    assert "password_hash" not in private_data
+    stored_hash = fake_redis.hget("room:1", "password_hash")
+    assert stored_hash != password
+    assert verify_password(password, stored_hash)
+
+    lobby = client.get("/api/v1/rooms/")
+    assert [room["id"] for room in lobby.json()] == [2]
+    assert lobby.json()[0]["time_per_move"] == 15
+
+
+def test_password_protected_room_and_spectator_policy(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    created = client.post(
+        "/api/v1/rooms/",
+        json={
+            "room_name": "Locked table",
+            "is_public": True,
+            "password": "room-password",
+            "allow_spectators": False,
+        },
+    )
+    invite_token = parse_qs(urlparse(created.json()["join_url"]).query)["token"][0]
+
+    wrong_password = client.post(
+        "/api/v1/rooms/1/join",
+        json={"password": "wrong-password"},
+    )
+    first_player = client.post(
+        "/api/v1/rooms/join",
+        json={"room_code": "1", "password": "room-password"},
+    )
+    resumed_player = client.post(
+        "/api/v1/rooms/1/join",
+        json={"participant_token": first_player.json()["participant_token"]},
+    )
+    second_join = client.post(
+        "/api/v1/rooms/1/join",
+        json={"password": "room-password"},
+    )
+
+    assert wrong_password.status_code == 403
+    assert first_player.status_code == 200
+    assert first_player.json()["role"] == "player2"
+    assert resumed_player.status_code == 200
+    assert resumed_player.json()["role"] == "player2"
+    assert second_join.status_code == 403
+    assert second_join.json()["detail"] == "Spectators are not allowed in this room"
+    assert client.get(
+        "/api/v1/rooms/1",
+        headers={"X-Room-Participant-Token": created.json()["participant_token"]},
+    ).json()["spectator_count"] == 0
+
+    host_token = created.json()["participant_token"]
+    _ready_player_two(client, first_player.json()["participant_token"])
+    assert client.post(
+        "/api/v1/rooms/1/start", json={"participant_token": host_token}
+    ).status_code == 200
+    spectator_after_start = client.post(
+        "/api/v1/rooms/1/join",
+        json={"invite_token": invite_token},
+    )
+    assert spectator_after_start.status_code == 403
+
+
+def test_private_room_details_require_room_scoped_credentials(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    private_room = client.post(
+        "/api/v1/rooms/",
+        json={
+            "room_name": "Private details",
+            "is_public": False,
+            "password": "correct-password",
+        },
+    ).json()
+    other_room = client.post(
+        "/api/v1/rooms/",
+        json={"room_name": "Another room", "is_public": False},
+    ).json()
+    invite_token = parse_qs(urlparse(private_room["join_url"]).query)["token"][0]
+    url = f"/api/v1/rooms/{private_room['room_id']}"
+
+    assert client.get(url).status_code == 401
+    assert client.get(url, headers={"X-Room-Password": "wrong-password"}).status_code == 403
+    assert client.get(
+        url,
+        headers={"X-Room-Participant-Token": other_room["participant_token"]},
+    ).status_code == 403
+
+    host_details = client.get(
+        url,
+        headers={"X-Room-Participant-Token": private_room["participant_token"]},
+    )
+    invite_details = client.get(
+        url,
+        headers={"X-Room-Invite-Token": invite_token},
+    )
+    password_details = client.get(url, headers={"X-Room-Password": "correct-password"})
+
+    assert host_details.status_code == invite_details.status_code == password_details.status_code == 200
+    assert host_details.json()["room_name"] == "Private details"
+    assert "password" not in host_details.json()
+    assert "password_hash" not in host_details.json()
+
+
+def test_private_game_state_requires_access_and_respects_spectator_policy(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, fake_redis = rooms_client
+    host = client.post(
+        "/api/v1/rooms/",
+        json={
+            "room_name": "Private game state",
+            "is_public": False,
+            "password": "match-password",
+            "allow_spectators": True,
+        },
+    ).json()
+    invite_token = parse_qs(urlparse(host["join_url"]).query)["token"][0]
+    opponent = client.post(
+        f"/api/v1/rooms/{host['room_id']}/join",
+        json={"password": "match-password"},
+    ).json()
+    _ready_player_two(client, opponent["participant_token"], host["room_id"])
+    started = client.post(
+        f"/api/v1/rooms/{host['room_id']}/start",
+        json={"participant_token": host["participant_token"]},
+    )
+    assert started.status_code == 200
+
+    url = f"/api/v1/rooms/{host['room_id']}/game"
+    unauthenticated = client.get(url)
+    assert unauthenticated.status_code == 401
+    assert "fen" not in unauthenticated.json()
+    assert client.get(
+        url,
+        headers={"X-Room-Participant-Token": host["participant_token"]},
+    ).status_code == 200
+    assert client.get(
+        url,
+        headers={"X-Room-Participant-Token": opponent["participant_token"]},
+    ).status_code == 200
+    assert client.get(
+        url,
+        headers={"X-Room-Invite-Token": invite_token},
+    ).status_code == 200
+
+    denied_host = client.post(
+        "/api/v1/rooms/",
+        json={
+            "room_name": "No spectators",
+            "is_public": False,
+            "password": "closed-password",
+            "allow_spectators": False,
+        },
+    ).json()
+    denied_invite_token = parse_qs(urlparse(denied_host["join_url"]).query)["token"][0]
+    denied_opponent = client.post(
+        f"/api/v1/rooms/{denied_host['room_id']}/join",
+        json={"password": "closed-password"},
+    ).json()
+    _ready_player_two(client, denied_opponent["participant_token"], denied_host["room_id"])
+    assert client.post(
+        f"/api/v1/rooms/{denied_host['room_id']}/start",
+        json={"participant_token": denied_host["participant_token"]},
+    ).status_code == 200
+
+    denied_url = f"/api/v1/rooms/{denied_host['room_id']}/game"
+    assert client.get(
+        denied_url,
+        headers={"X-Room-Invite-Token": denied_invite_token},
+    ).status_code == 403
+    assert client.get(
+        denied_url,
+        headers={"X-Room-Password": "closed-password"},
+    ).status_code == 403
+
+    forged_spectator_token = "spectator-token-that-is-not-issued-0001"
+    fake_redis.hset("room:2:participants", forged_spectator_token, "spectator")
+    assert client.get(
+        denied_url,
+        headers={"X-Room-Participant-Token": forged_spectator_token},
+    ).status_code == 403
+    with pytest.raises(WebSocketDisconnect) as closed:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{denied_host['room_id']}/ws?participant_token={forged_spectator_token}"
+        ):
+            pass
+    assert closed.value.code == 4403
+
+
+def test_leaving_participant_socket_is_revoked_before_future_room_events(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post(
+        "/api/v1/rooms/",
+        json={"room_name": "Socket revocation", "is_public": False},
+    ).json()
+    opponent = client.post(
+        f"/api/v1/rooms/{host['room_id']}/join",
+        json={"invite_token": parse_qs(urlparse(host["join_url"]).query)["token"][0]},
+    ).json()
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/{host['room_id']}/ws?participant_token={host['participant_token']}"
+    ) as host_ws:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{host['room_id']}/ws?participant_token={opponent['participant_token']}"
+        ) as opponent_ws:
+            assert host_ws.receive_json()["type"] == "room.snapshot"
+            assert opponent_ws.receive_json()["type"] == "room.snapshot"
+
+            left = client.post(
+                f"/api/v1/rooms/{host['room_id']}/leave",
+                json={"participant_token": opponent["participant_token"]},
+            )
+
+            assert left.status_code == 200
+            assert _receive_socket_event(host_ws, "room.participant_left")["room"]["player_count"] == 1
+            with pytest.raises(WebSocketDisconnect) as closed:
+                opponent_ws.receive_json()
+            assert closed.value.code == 4403
+
+
+def test_private_room_without_password_requires_invitation_token(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    created = client.post(
+        "/api/v1/rooms/",
+        json={"room_name": "Invite-only table", "is_public": False},
+    )
+    invite_token = parse_qs(urlparse(created.json()["join_url"]).query)["token"][0]
+
+    denied = client.post("/api/v1/rooms/1/join", json={})
+    joined = client.post(
+        "/api/v1/rooms/1/join",
+        json={"invite_token": invite_token},
+    )
+
+    assert created.status_code == 201
+    assert client.get("/api/v1/rooms/").json() == []
+    assert denied.status_code == 403
+    assert joined.status_code == 200
+    assert joined.json()["role"] == "player2"
 
 
 def test_invalid_invitation_token_does_not_join_room(
@@ -503,6 +924,7 @@ def test_disconnected_player_can_reconnect_and_resume_game_clock(
         json={"name": "Reconnect test", "timer_seconds": 60},
     ).json()
     opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
     client.post(
         "/api/v1/rooms/1/start",
         json={"participant_token": host["participant_token"]},
@@ -553,6 +975,7 @@ def test_one_of_multiple_host_sockets_dropping_does_not_start_reconnect_window(
         json={"name": "Multiple sockets", "timer_seconds": 60},
     ).json()
     opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
     client.post(
         "/api/v1/rooms/1/start",
         json={"participant_token": host["participant_token"]},
@@ -591,6 +1014,7 @@ def test_reconnect_timeout_forfeits_disconnected_player(
         json={"name": "Reconnect timeout", "timer_seconds": 60},
     ).json()
     opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
     client.post(
         "/api/v1/rooms/1/start",
         json={"participant_token": host["participant_token"]},
@@ -627,6 +1051,7 @@ def test_host_voluntary_exit_forfeits_then_deletes_playing_room(
         json={"name": "Host forfeit", "timer_seconds": 60},
     ).json()
     opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
     client.post(
         "/api/v1/rooms/1/start",
         json={"participant_token": host["participant_token"]},
@@ -669,7 +1094,8 @@ def test_lobby_socket_snapshots_waiting_rooms_and_hides_started_rooms(
         json={"name": "Lobby test", "host_name": "Lobby Host"},
     )
     host = created.json()
-    client.post("/api/v1/rooms/1/join", json={})
+    opponent = client.post("/api/v1/rooms/1/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"])
 
     with client.websocket_connect("/api/v1/rooms/ws") as websocket:
         snapshot = websocket.receive_json()
