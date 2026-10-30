@@ -53,6 +53,9 @@
       .room-panel p { margin: 7px 0 0; color: #718078; font-size: 13px; }
       .room-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
       .room-controls button[hidden] { display: none; }
+      .game-status { flex-basis: 100%; margin: 0; color: #80591e; font-size: 12px; }
+      .notation-list { display: grid; gap: 8px; max-height: 180px; margin: 10px 0 0; padding: 0; overflow: auto; list-style: none; }
+      .notation-list li { padding: 10px 12px; border: 1px solid #e1dccf; border-radius: 10px; background: #f8f6ef; font-size: 13px; }
       .room-error { flex-basis: 100%; margin: 0; color: #a63e32; font-size: 12px; text-align: right; }
       .empty { grid-column: 1 / -1; padding: 30px; border: 1px dashed #cfc9bb; border-radius: 18px; color: #718078; text-align: center; }
       dialog { width: min(590px, calc(100% - 28px)); max-height: min(90vh, 820px); padding: 0; overflow: auto; border: 1px solid #e5dfd1; border-radius: 24px; background: #fffdf8; color: #18312a; box-shadow: 0 30px 90px #102b2555; }
@@ -132,7 +135,12 @@
       <div class="room-controls">
         <button class="secondary" id="room-ready" type="button" hidden>Sẵn sàng</button>
         <button class="primary" id="room-start" type="button" hidden disabled>Bắt đầu</button>
+        <button class="secondary" id="room-offer-draw" type="button" hidden>Cầu hòa</button>
+        <button class="secondary" id="room-accept-draw" type="button" hidden>Đồng ý hòa</button>
+        <button class="secondary" id="room-decline-draw" type="button" hidden>Từ chối</button>
+        <button class="secondary" id="room-resign" type="button" hidden>Đầu hàng</button>
         <button class="secondary" id="room-leave" type="button">Rời phòng</button>
+        <p class="game-status" id="game-status" role="status" aria-live="polite"></p>
         <p class="room-error" id="room-error" role="alert"></p>
       </div>
     </section>
@@ -178,6 +186,21 @@
       </div>
     </dialog>
 
+    <dialog class="result" id="game-over-dialog" aria-labelledby="game-over-title">
+      <div class="dialog-body">
+        <div class="modal-heading"><div><p class="eyebrow">Kết quả ván đấu</p><h2 id="game-over-title">Ván đấu đã kết thúc</h2><p id="game-over-reason"></p></div></div>
+        <p class="result-label">Biên bản nước đi</p>
+        <div class="result-value" id="game-over-notation">Chưa có nước đi.</div>
+        <p class="result-label">Lịch sử phòng</p>
+        <ol class="notation-list" id="match-history"></ol>
+        <p class="game-status" id="rematch-status" role="status" aria-live="polite"></p>
+        <div class="actions">
+          <button class="secondary" id="room-rematch" type="button">Tái đấu</button>
+          <button class="primary" id="back-to-lobby" type="button">Về sảnh chờ</button>
+        </div>
+      </div>
+    </dialog>
+
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
     <script>
@@ -194,9 +217,23 @@
       const roomError = document.querySelector("#room-error");
       const readyButton = document.querySelector("#room-ready");
       const startButton = document.querySelector("#room-start");
+      const offerDrawButton = document.querySelector("#room-offer-draw");
+      const acceptDrawButton = document.querySelector("#room-accept-draw");
+      const declineDrawButton = document.querySelector("#room-decline-draw");
+      const resignButton = document.querySelector("#room-resign");
+      const leaveButton = document.querySelector("#room-leave");
+      const gameStatus = document.querySelector("#game-status");
+      const gameOverDialog = document.querySelector("#game-over-dialog");
+      const gameOverTitle = document.querySelector("#game-over-title");
+      const gameOverReason = document.querySelector("#game-over-reason");
+      const gameOverNotation = document.querySelector("#game-over-notation");
+      const matchHistory = document.querySelector("#match-history");
+      const rematchButton = document.querySelector("#room-rematch");
+      const rematchStatus = document.querySelector("#rematch-status");
       let createdRoomAccess = null;
       let activeRoomAccess = null;
       let activeRoomSocket = null;
+      let activeGameSnapshot = null;
 
       function showToast(message) {
         toast.textContent = message;
@@ -288,6 +325,98 @@
         startButton.hidden = activeRoomAccess.role !== "player1" || !waiting;
         startButton.disabled = !ready;
         startButton.title = ready ? "Bắt đầu ván đấu" : "Đang chờ Player 2 sẵn sàng";
+        const isPlayer = ["player1", "player2"].includes(activeRoomAccess.role);
+        const playing = activeRoomAccess.status === "playing";
+        const offer = activeGameSnapshot?.draw_offer_by;
+        offerDrawButton.hidden = !playing || !isPlayer;
+        offerDrawButton.disabled = Boolean(offer);
+        offerDrawButton.textContent = offer === activeRoomAccess.role ? "Đã cầu hòa" : "Cầu hòa";
+        acceptDrawButton.hidden = !playing || !isPlayer || !offer || offer === activeRoomAccess.role;
+        declineDrawButton.hidden = acceptDrawButton.hidden;
+        resignButton.hidden = !playing || !isPlayer;
+        leaveButton.textContent = activeRoomAccess.status === "finished" ? "Về sảnh chờ" : "Rời phòng";
+        gameStatus.textContent = !offer
+          ? ""
+          : offer === activeRoomAccess.role
+            ? "Đang chờ đối thủ trả lời lời cầu hòa."
+            : "Đối thủ đang đề nghị hòa.";
+      }
+
+      function updateGameSnapshot(game) {
+        activeGameSnapshot = game || null;
+        if (activeRoomAccess) {
+          updateRoomPanel({
+            ...activeRoomAccess,
+            ...(game?.status ? { status: game.status } : {}),
+          });
+        }
+      }
+
+      function gameResultLabel(result) {
+        return ({
+          checkmate: "Chiếu bí",
+          stalemate: "Hết nước đi hợp lệ",
+          draw: "Hòa theo luật cờ",
+          perpetual_check_loss: "Thua do chiếu liên tục",
+          perpetual_chase_loss: "Thua do đuổi bắt liên tục",
+          timeout: "Hết giờ",
+          resignation: "Đầu hàng",
+          forfeit: "Rời trận",
+          agreement: "Hai bên đồng ý hòa",
+        })[result] || "Ván đấu đã kết thúc";
+      }
+
+      async function loadMatchHistory() {
+        if (!activeRoomAccess) return;
+        const roomId = activeRoomAccess.room_id || activeRoomAccess.id;
+        try {
+          const response = await fetch(`/api/v1/rooms/${roomId}/matches`);
+          if (!response.ok) throw new Error("Không thể tải lịch sử trận.");
+          const history = await response.json();
+          matchHistory.replaceChildren();
+          if (!history.length) {
+            const empty = document.createElement("li");
+            empty.textContent = "Chưa có trận nào được lưu.";
+            matchHistory.append(empty);
+            return;
+          }
+          history.forEach((match) => {
+            const item = document.createElement("li");
+            const moves = match.notation || "Không có nước đi.";
+            item.textContent = `Ván ${match.round_number}: ${gameResultLabel(match.result)} · ${moves}`;
+            matchHistory.append(item);
+          });
+        } catch (error) {
+          matchHistory.replaceChildren();
+          const item = document.createElement("li");
+          item.textContent = error.message;
+          matchHistory.append(item);
+        }
+      }
+
+      function showGameOver(event) {
+        const game = event.game || activeGameSnapshot || {};
+        updateGameSnapshot(game);
+        const result = event.result || game.result;
+        const winner = event.winner || game.winner;
+        const winnerRole = winner === "w" ? "player1" : winner === "b" ? "player2" : null;
+        let title = "Ván đấu hòa";
+        if (winnerRole) {
+          if (activeRoomAccess?.role === "spectator") {
+            title = winnerRole === "player1" ? "Bên Đỏ thắng" : "Bên Đen thắng";
+          } else {
+            title = winnerRole === activeRoomAccess?.role ? "Bạn thắng" : "Bạn thua";
+          }
+        }
+        gameOverTitle.textContent = title;
+        gameOverReason.textContent = gameResultLabel(result);
+        gameOverNotation.textContent = event.notation || game.notation || "Chưa có nước đi.";
+        rematchButton.hidden = !["player1", "player2"].includes(activeRoomAccess?.role);
+        rematchButton.disabled = false;
+        rematchButton.textContent = "Tái đấu";
+        rematchStatus.textContent = "";
+        if (!gameOverDialog.open) gameOverDialog.showModal();
+        loadMatchHistory();
       }
 
       function openRoom(access) {
@@ -297,7 +426,9 @@
         }
         createdRoomAccess = access;
         activeRoomAccess = access;
+        activeGameSnapshot = null;
         roomError.textContent = "";
+        gameStatus.textContent = "";
         roomPanel.hidden = false;
         updateRoomPanel(access);
         roomPanel.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -309,14 +440,42 @@
           let event;
           try { event = JSON.parse(message.data); } catch { return; }
           if (event.room) updateRoomPanel({ ...event.room, role: activeRoomAccess.role });
-          if (event.type === "room.snapshot") updateRoomPanel({ ...event.room, role: event.role });
+          if (event.type === "room.snapshot") {
+            updateRoomPanel({ ...event.room, role: event.role });
+            updateGameSnapshot(event.game);
+            if (event.game?.status === "finished") showGameOver({ type: "game_over", ...event.game, game: event.game });
+          }
+          if (event.game && event.type !== "room.snapshot") updateGameSnapshot(event.game);
           if (event.type === "error") roomError.textContent = event.reason || "Yêu cầu không hợp lệ.";
           if (event.type === "room.closed") {
             roomPanelState.textContent = "Phòng đã đóng.";
             readyButton.hidden = true;
             startButton.hidden = true;
           }
-          if (["room.participant_joined", "player.ready", "room.started"].includes(event.type)) {
+          if (["game_over", "game.timeout", "game.forfeit"].includes(event.type)) showGameOver(event);
+          if (event.type === "draw_offered") {
+            gameStatus.textContent = event.role === activeRoomAccess.role
+              ? "Đang chờ đối thủ trả lời lời cầu hòa."
+              : "Đối thủ đang đề nghị hòa.";
+          }
+          if (event.type === "draw_declined") gameStatus.textContent = "Đối thủ đã từ chối hòa.";
+          if (event.type === "room.rematch_requested") {
+            const requestedByMe = event.role === activeRoomAccess.role;
+            rematchButton.disabled = requestedByMe;
+            rematchButton.textContent = requestedByMe ? "Đang chờ đối thủ…" : "Đồng ý tái đấu";
+            rematchStatus.textContent = requestedByMe
+              ? "Đã gửi yêu cầu tái đấu."
+              : "Đối thủ muốn tái đấu với bạn.";
+            if (!gameOverDialog.open) gameOverDialog.showModal();
+          }
+          if (event.type === "room.rematch_started") {
+            activeGameSnapshot = null;
+            updateRoomPanel({ ...event.room, role: activeRoomAccess.role });
+            gameStatus.textContent = "Tái đấu đã sẵn sàng. Player 2 hãy sẵn sàng để chủ phòng bắt đầu.";
+            rematchStatus.textContent = "Tái đấu đã sẵn sàng. Player 2 cần sẵn sàng rồi chủ phòng có thể bắt đầu.";
+            gameOverDialog.close();
+          }
+          if (["room.participant_joined", "player.ready", "room.started", "room.rematch_started"].includes(event.type)) {
             loadRooms();
           }
         });
@@ -387,6 +546,16 @@
       });
       document.querySelector("#refresh-rooms").addEventListener("click", loadRooms);
 
+      function sendRoomMessage(message) {
+        if (!activeRoomSocket || activeRoomSocket.readyState !== WebSocket.OPEN) {
+          roomError.textContent = "Đang kết nối lại với phòng…";
+          return false;
+        }
+        roomError.textContent = "";
+        activeRoomSocket.send(JSON.stringify(message));
+        return true;
+      }
+
       readyButton.addEventListener("click", () => {
         if (!activeRoomAccess || !activeRoomSocket || activeRoomSocket.readyState !== WebSocket.OPEN) {
           roomError.textContent = "Đang kết nối lại với phòng…";
@@ -397,6 +566,22 @@
           type: "ready",
           ready: !activeRoomAccess.player2_ready,
         }));
+      });
+
+      offerDrawButton.addEventListener("click", () => sendRoomMessage({ type: "offer_draw" }));
+      acceptDrawButton.addEventListener("click", () => sendRoomMessage({ type: "respond_draw", accept: true }));
+      declineDrawButton.addEventListener("click", () => sendRoomMessage({ type: "respond_draw", accept: false }));
+      resignButton.addEventListener("click", () => {
+        if (window.confirm("Bạn chắc chắn muốn đầu hàng ván này?")) {
+          sendRoomMessage({ type: "resign" });
+        }
+      });
+      rematchButton.addEventListener("click", () => {
+        if (sendRoomMessage({ type: "rematch" })) {
+          rematchButton.disabled = true;
+          rematchButton.textContent = "Đang chờ đối thủ…";
+          rematchStatus.textContent = "Đang gửi yêu cầu tái đấu.";
+        }
       });
 
       startButton.addEventListener("click", async () => {
@@ -418,7 +603,7 @@
         }
       });
 
-      document.querySelector("#room-leave").addEventListener("click", async () => {
+      async function leaveCurrentRoom() {
         if (!activeRoomAccess) return;
         try {
           const response = await fetch(`/api/v1/rooms/${activeRoomAccess.room_id || activeRoomAccess.id}/leave`, {
@@ -431,12 +616,17 @@
           activeRoomSocket?.close();
           activeRoomSocket = null;
           activeRoomAccess = null;
+          activeGameSnapshot = null;
           roomPanel.hidden = true;
+          if (gameOverDialog.open) gameOverDialog.close();
           await loadRooms();
         } catch (error) {
           roomError.textContent = error.message;
         }
-      });
+      }
+
+      leaveButton.addEventListener("click", leaveCurrentRoom);
+      document.querySelector("#back-to-lobby").addEventListener("click", leaveCurrentRoom);
 
       createForm.addEventListener("submit", async (event) => {
         event.preventDefault();

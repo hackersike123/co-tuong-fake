@@ -82,6 +82,7 @@ if redis.call('HGET', KEYS[1], 'player2_ready') ~= 'true' then
     return -5
 end
 local timer_seconds = tonumber(redis.call('HGET', KEYS[1], 'timer_seconds') or '30')
+local round_number = tonumber(redis.call('HGET', KEYS[1], 'game_round') or '0') + 1
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 redis.call('HSET', KEYS[1],
@@ -95,8 +96,15 @@ redis.call('HSET', KEYS[1],
     'red_time_ms', timer_seconds * 1000,
     'black_time_ms', timer_seconds * 1000,
     'turn_started_at_ms', now_ms,
+    'game_round', round_number,
+    'game_notation', '',
     'game_result', '',
-    'game_winner', '')
+    'game_reason', '',
+    'game_winner', '',
+    'game_draw_offer', '',
+    'player1_rematch_requested', 'false',
+    'player2_rematch_requested', 'false')
+redis.call('HDEL', KEYS[1], 'player1_reconnect_deadline_ms', 'player2_reconnect_deadline_ms')
 redis.call('ZREM', KEYS[2], ARGV[2])
 return 1
 """
@@ -139,6 +147,7 @@ if remaining_ms <= 0 then
         clock_field, 0,
         'status', 'finished',
         'game_result', 'timeout',
+        'game_reason', 'timeout',
         'game_winner', timeout_winner,
         'game_version', next_version)
     return -3
@@ -150,10 +159,18 @@ redis.call('HSET', KEYS[1],
     'game_version', next_version,
     'side_to_move', next_side,
     'turn_started_at_ms', now_ms)
+local notation = redis.call('HGET', KEYS[1], 'game_notation') or ''
+if notation == '' then
+    redis.call('HSET', KEYS[1], 'game_notation', ARGV[8])
+else
+    redis.call('HSET', KEYS[1], 'game_notation', notation .. ' ' .. ARGV[8])
+end
 if ARGV[6] ~= '' then
     redis.call('HSET', KEYS[1],
         'status', 'finished',
         'game_result', ARGV[6],
+        'game_reason', ARGV[9],
+        'game_paused', 'true',
         'game_winner', ARGV[7])
 end
 return 1
@@ -190,9 +207,114 @@ redis.call('HSET', KEYS[1],
     clock_field, 0,
     'status', 'finished',
     'game_result', 'timeout',
+    'game_reason', 'timeout',
     'game_winner', winner,
     'game_version', version + 1)
 return 1
+"""
+
+_OFFER_DRAW_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2]
+    or (ARGV[2] ~= 'player1' and ARGV[2] ~= 'player2') then
+    return -2
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'playing'
+    or redis.call('HGET', KEYS[1], 'game_paused') == 'true' then
+    return -3
+end
+local existing_offer = redis.call('HGET', KEYS[1], 'game_draw_offer') or ''
+if existing_offer == ARGV[2] then return 2 end
+if existing_offer ~= '' then return -4 end
+redis.call('HSET', KEYS[1], 'game_draw_offer', ARGV[2])
+return 1
+"""
+
+_RESPOND_DRAW_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2]
+    or (ARGV[2] ~= 'player1' and ARGV[2] ~= 'player2') then
+    return -2
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'playing' then return -3 end
+local offered_by = redis.call('HGET', KEYS[1], 'game_draw_offer') or ''
+if offered_by == '' or offered_by == ARGV[2] then return -4 end
+if ARGV[3] == 'true' then
+    local version = tonumber(redis.call('HGET', KEYS[1], 'game_version') or '0')
+    redis.call('HSET', KEYS[1],
+        'status', 'finished',
+        'game_result', 'agreement',
+        'game_reason', 'draw_agreement',
+        'game_winner', '',
+        'game_draw_offer', '',
+        'game_paused', 'true',
+        'game_version', version + 1)
+    return 2
+end
+redis.call('HSET', KEYS[1], 'game_draw_offer', '')
+return 1
+"""
+
+_RESIGN_GAME_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2]
+    or (ARGV[2] ~= 'player1' and ARGV[2] ~= 'player2') then
+    return -2
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'playing' then return -3 end
+local winner = 'b'
+if ARGV[2] == 'player2' then winner = 'w' end
+local version = tonumber(redis.call('HGET', KEYS[1], 'game_version') or '0')
+redis.call('HSET', KEYS[1],
+    'status', 'finished',
+    'game_result', 'resignation',
+    'game_reason', 'resignation',
+    'game_winner', winner,
+    'game_draw_offer', '',
+    'game_paused', 'true',
+    'game_version', version + 1)
+return 1
+"""
+
+_REQUEST_REMATCH_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2]
+    or (ARGV[2] ~= 'player1' and ARGV[2] ~= 'player2') then
+    return -2
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'finished' then return -3 end
+local request_field = ARGV[2] .. '_rematch_requested'
+redis.call('HSET', KEYS[1], request_field, 'true')
+if redis.call('HGET', KEYS[1], 'player1_rematch_requested') ~= 'true'
+    or redis.call('HGET', KEYS[1], 'player2_rematch_requested') ~= 'true' then
+    return 1
+end
+local redis_time = redis.call('TIME')
+local now_seconds = tonumber(redis_time[1]) + tonumber(redis_time[2]) / 1000000
+redis.call('HSET', KEYS[1],
+    'status', 'waiting',
+    'player2_ready', 'false',
+    'game_fen', '',
+    'game_version', 0,
+    'side_to_move', 'w',
+    'red_time_ms', 0,
+    'black_time_ms', 0,
+    'game_paused', 'false',
+    'game_result', '',
+    'game_reason', '',
+    'game_winner', '',
+    'game_notation', '',
+    'game_draw_offer', '',
+    'player1_connected', 'true',
+    'player2_connected', 'true',
+    'player1_rematch_requested', 'false',
+    'player2_rematch_requested', 'false')
+redis.call('HDEL', KEYS[1], 'turn_started_at_ms',
+    'player1_reconnect_deadline_ms', 'player2_reconnect_deadline_ms')
+if redis.call('HGET', KEYS[1], 'is_public') == 'true' then
+    redis.call('ZADD', KEYS[3], now_seconds, ARGV[3])
+end
+return 2
 """
 
 _LEAVE_ROOM_SCRIPT = """
@@ -209,6 +331,7 @@ if role == 'player1' and status == 'playing' then
     redis.call('HSET', KEYS[1],
         'status', 'finished',
         'game_result', 'forfeit',
+        'game_reason', 'player_left',
         'game_winner', 'b',
         'game_paused', 'true',
         'game_version', version + 1)
@@ -232,6 +355,7 @@ if role == 'player2' and status == 'playing' then
     redis.call('HSET', KEYS[1],
         'status', 'finished',
         'game_result', 'forfeit',
+        'game_reason', 'player_left',
         'game_winner', 'w',
         'game_paused', 'true',
         'game_version', version + 1,
@@ -314,6 +438,7 @@ if role == 'player1' or role == 'player2' then
             redis.call('HSET', KEYS[1],
                 'status', 'finished',
                 'game_result', 'timeout',
+                'game_reason', 'timeout',
                 'game_winner', timeout_winner,
                 'game_paused', 'true',
                 'game_version', version + 1)
@@ -363,6 +488,7 @@ if status == 'playing' and redis.call('HGET', KEYS[1], connected_field) == 'fals
         redis.call('HSET', KEYS[1],
             'status', 'finished',
             'game_result', 'forfeit',
+            'game_reason', 'reconnect_timeout',
             'game_winner', winner,
             'game_paused', 'true',
             'game_version', version + 1)
@@ -406,6 +532,7 @@ local version = tonumber(redis.call('HGET', KEYS[1], 'game_version') or '0')
 redis.call('HSET', KEYS[1],
     'status', 'finished',
     'game_result', 'forfeit',
+    'game_reason', 'reconnect_timeout',
     'game_winner', winner,
     'game_paused', 'true',
     'game_version', version + 1)
@@ -684,7 +811,16 @@ def get_game_snapshot(room_id: int) -> dict[str, Any] | None:
         "timer_seconds": int(values.get("timer_seconds", 30)),
         "status": values.get("status", "playing"),
         "result": values.get("game_result") or None,
+        "reason": values.get("game_reason") or None,
         "winner": values.get("game_winner") or None,
+        "round_number": int(values.get("game_round", 0)),
+        "notation": values.get("game_notation", ""),
+        "draw_offer_by": values.get("game_draw_offer") or None,
+        "rematch_requested_by": [
+            role
+            for role in ("player1", "player2")
+            if values.get(f"{role}_rematch_requested") == "true"
+        ],
         "paused": paused,
         "disconnected_players": [
             role
@@ -709,6 +845,8 @@ def apply_game_move(
     next_fen: str,
     result: str | None = None,
     winner: str | None = None,
+    notation: str = "",
+    reason: str | None = None,
 ) -> int:
     """Atomically apply a validated move and charge its mover's clock.
 
@@ -729,6 +867,72 @@ def apply_game_move(
             next_fen,
             result or "",
             winner or "",
+            notation,
+            reason or "",
+        )
+    )
+
+
+def offer_draw(room_id: int, participant_token: str, role: str) -> int:
+    """Offer an agreed draw; only the other player can accept or decline it."""
+    return int(
+        redis_client.eval(
+            _OFFER_DRAW_SCRIPT,
+            2,
+            _room_key(room_id),
+            _participants_key(room_id),
+            participant_token,
+            role,
+        )
+    )
+
+
+def respond_to_draw(
+    room_id: int,
+    participant_token: str,
+    role: str,
+    accept: bool,
+) -> int:
+    """Accept or decline the pending draw offer from the opposing player."""
+    return int(
+        redis_client.eval(
+            _RESPOND_DRAW_SCRIPT,
+            2,
+            _room_key(room_id),
+            _participants_key(room_id),
+            participant_token,
+            role,
+            "true" if accept else "false",
+        )
+    )
+
+
+def resign_game(room_id: int, participant_token: str, role: str) -> int:
+    """Finish a playing game atomically with the other player as the winner."""
+    return int(
+        redis_client.eval(
+            _RESIGN_GAME_SCRIPT,
+            2,
+            _room_key(room_id),
+            _participants_key(room_id),
+            participant_token,
+            role,
+        )
+    )
+
+
+def request_rematch(room_id: int, participant_token: str, role: str) -> int:
+    """Start a new waiting round only after both players request a rematch."""
+    return int(
+        redis_client.eval(
+            _REQUEST_REMATCH_SCRIPT,
+            3,
+            _room_key(room_id),
+            _participants_key(room_id),
+            PUBLIC_ROOMS_KEY,
+            participant_token,
+            role,
+            room_id,
         )
     )
 

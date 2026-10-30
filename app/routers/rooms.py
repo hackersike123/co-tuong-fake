@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import ValidationError
 from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
 from ..email_service import (
@@ -15,6 +16,7 @@ from ..email_service import (
     EmailDeliveryError,
     send_room_invitation_email,
 )
+from ..match_service import list_match_history, match_payload, record_completed_match
 from ..room_hub import room_hub
 from ..room_access import authorize_room_access
 from ..room_schemas import (
@@ -25,6 +27,7 @@ from ..room_schemas import (
     RoomInviteRequest,
     RoomInviteResponse,
     RoomGameSnapshot,
+    RoomMatchHistory,
     RoomJoinRequest,
     RoomReadyRequest,
     RoomLeaveResponse,
@@ -47,6 +50,10 @@ from ..room_store import (
     mark_player_reconnected,
     set_player_ready,
     start_room,
+    offer_draw,
+    respond_to_draw,
+    resign_game,
+    request_rematch,
 )
 from ..security import hash_password, verify_password
 from ..settings import PUBLIC_APP_URL
@@ -145,6 +152,128 @@ def _update_player_ready(
     return room
 
 
+def _game_over_event(room_id: int, game: dict[str, Any]) -> dict[str, Any]:
+    """Build the common terminal event used by every completed game round."""
+    return {
+        "type": "game_over",
+        "room_id": room_id,
+        "result": game.get("result"),
+        "reason": game.get("reason") or game.get("result"),
+        "winner": game.get("winner"),
+        "notation": game.get("notation", ""),
+        "game": game,
+    }
+
+
+def _move_notation(snapshot: dict[str, Any], move: Move, side: Side) -> str:
+    """Format the server-accepted move in coordinate notation (for example b9-a7)."""
+    files = "abcdefghi"
+
+    def square_name(square: tuple[int, int]) -> str:
+        row, column = square
+        return f"{files[column]}{row}"
+
+    move_number = snapshot["version"] // 2 + 1
+    prefix = f"{move_number}." if side is Side.RED else f"{move_number}..."
+    return f"{prefix} {square_name(move.origin)}-{square_name(move.destination)}"
+
+
+def _room_action_error(result: int, action: str) -> dict[str, Any] | None:
+    """Map the Redis lifecycle script's negative statuses to a socket error."""
+    errors = {
+        -1: "room_not_found",
+        -2: "player_required",
+        -3: "game_not_playing" if action != "rematch" else "game_not_finished",
+        -4: "draw_offer_pending" if action == "offer_draw" else "no_pending_draw_offer",
+    }
+    if result >= 0:
+        return None
+    return {"type": "error", "reason": errors.get(result, "invalid_game_action")}
+
+
+def _process_offer_draw(
+    room_id: int, role: str, participant_token: str
+) -> dict[str, Any]:
+    if role not in {"player1", "player2"}:
+        return {"type": "error", "reason": "players_only"}
+    try:
+        result = offer_draw(room_id, participant_token, role)
+        game = get_game_snapshot(room_id)
+    except RedisError:
+        logger.exception("Could not offer a draw in room %s", room_id)
+        return {"type": "error", "reason": "game_service_unavailable"}
+    error = _room_action_error(result, "offer_draw")
+    if error:
+        return error
+    if game is None:
+        return {"type": "error", "reason": "game_not_playing"}
+    return {"type": "draw_offered", "room_id": room_id, "role": role, "game": game}
+
+
+def _process_draw_response(
+    room_id: int,
+    role: str,
+    participant_token: str,
+    accept: bool,
+) -> dict[str, Any]:
+    if role not in {"player1", "player2"}:
+        return {"type": "error", "reason": "players_only"}
+    try:
+        result = respond_to_draw(room_id, participant_token, role, accept)
+        game = get_game_snapshot(room_id)
+    except RedisError:
+        logger.exception("Could not respond to a draw offer in room %s", room_id)
+        return {"type": "error", "reason": "game_service_unavailable"}
+    if result == 2:
+        if game is None:
+            return {"type": "error", "reason": "game_not_playing"}
+        record_completed_match(room_id)
+        return _game_over_event(room_id, game)
+    if result == 1:
+        return {"type": "draw_declined", "room_id": room_id, "role": role, "game": game}
+    error = _room_action_error(result, "respond_draw")
+    return error or {"type": "error", "reason": "no_pending_draw_offer"}
+
+
+def _process_resignation(
+    room_id: int, role: str, participant_token: str
+) -> dict[str, Any]:
+    if role not in {"player1", "player2"}:
+        return {"type": "error", "reason": "players_only"}
+    try:
+        result = resign_game(room_id, participant_token, role)
+        game = get_game_snapshot(room_id)
+    except RedisError:
+        logger.exception("Could not resign game in room %s", room_id)
+        return {"type": "error", "reason": "game_service_unavailable"}
+    if result == 1 and game is not None:
+        record_completed_match(room_id)
+        return _game_over_event(room_id, game)
+    error = _room_action_error(result, "resign")
+    return error or {"type": "error", "reason": "game_not_playing"}
+
+
+def _process_rematch(
+    room_id: int, role: str, participant_token: str
+) -> dict[str, Any]:
+    if role not in {"player1", "player2"}:
+        return {"type": "error", "reason": "players_only"}
+    try:
+        result = request_rematch(room_id, participant_token, role)
+        room = get_room(room_id)
+    except RedisError:
+        logger.exception("Could not request a rematch in room %s", room_id)
+        return {"type": "error", "reason": "game_service_unavailable"}
+    error = _room_action_error(result, "rematch")
+    if error:
+        return error
+    if result == 2:
+        if room is None:
+            return {"type": "error", "reason": "room_not_found"}
+        return {"type": "room.rematch_started", "room": room}
+    return {"type": "room.rematch_requested", "room_id": room_id, "role": role}
+
+
 def _process_room_move(
     room_id: int,
     role: str,
@@ -203,6 +332,8 @@ def _process_room_move(
             next_fen=next_state.to_fen(),
             result=result,
             winner=winner.value if winner is not None else None,
+            notation=_move_notation(snapshot, move, moving_side),
+            reason=status_after_move.value if terminal else None,
         )
         latest_snapshot = get_game_snapshot(room_id)
     except RedisError as exc:
@@ -212,7 +343,13 @@ def _process_room_move(
     if update_result == -3:
         if latest_snapshot is None:
             return {"type": "move_rejected", "reason": "game_not_playing"}
-        return {"type": "game.timeout", "room_id": room_id, "game": latest_snapshot}
+        record_completed_match(room_id)
+        return {
+            "type": "game.timeout",
+            "room_id": room_id,
+            "game": latest_snapshot,
+            "game_over": _game_over_event(room_id, latest_snapshot),
+        }
     if update_result == -2:
         return {
             "type": "move_rejected",
@@ -222,12 +359,16 @@ def _process_room_move(
     if update_result != 1 or latest_snapshot is None:
         return {"type": "move_rejected", "reason": "game_not_playing"}
 
-    return {
+    event = {
         "type": "move_made",
         "room_id": room_id,
         "move": {"from": list(move.origin), "to": list(move.destination)},
         "game": latest_snapshot,
     }
+    if terminal:
+        record_completed_match(room_id)
+        event["game_over"] = _game_over_event(room_id, latest_snapshot)
+    return event
 
 
 @router.post(
@@ -451,6 +592,21 @@ def get_room_game_state(
     return RoomGameSnapshot(**game)
 
 
+@router.get(
+    "/{room_id}/matches",
+    response_model=list[RoomMatchHistory],
+    summary="Read completed game history for a room",
+)
+def get_room_match_history(room_id: int) -> list[RoomMatchHistory]:
+    """Return the newest saved match records, even if the room has closed."""
+    try:
+        matches = list_match_history(room_id)
+    except SQLAlchemyError as exc:
+        logger.exception("Could not load match history for room %s", room_id)
+        raise _service_unavailable() from exc
+    return [RoomMatchHistory(**match_payload(match)) for match in matches]
+
+
 @router.post(
     "/{room_id}/join",
     response_model=RoomAccessResponse,
@@ -662,6 +818,7 @@ def leave_public_room(
             raise _service_unavailable() from exc
         if game is None:
             raise _room_not_found()
+        record_completed_match(room_id)
         loser_role = "player1" if result == 4 else "player2"
         event = {
             "type": "game.forfeit",
@@ -829,10 +986,12 @@ async def _handle_room_socket_disconnect(room_id: int, participant_token: str) -
             logger.exception("Could not read timed-out game %s", room_id)
             game = None
         if game is not None:
+            record_completed_match(room_id)
             await room_hub.broadcast_room(
                 room_id,
                 {"type": "game.timeout", "room_id": room_id, "game": game},
             )
+            await room_hub.broadcast_room(room_id, _game_over_event(room_id, game))
     elif code == 1:
         try:
             updated_room = await run_in_threadpool(get_room, room_id)
@@ -952,6 +1111,7 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
                     "game": game,
                 },
             )
+            await run_in_threadpool(record_completed_match, room_id)
             await websocket.close(code=4409, reason="Reconnect window expired")
             return
         reconnected = reconnect_result == 1
@@ -1038,13 +1198,78 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
                     role,
                     message,
                 )
+                game_over = event.pop("game_over", None)
                 if event["type"] in {"move_made", "game.timeout"}:
                     game_state = event.get("game")
                     if game_state is not None and game_state["status"] == "finished":
                         await room_hub.stop_timer(room_id)
                     await room_hub.broadcast_room(room_id, event)
+                    if game_over is not None:
+                        await room_hub.broadcast_room(room_id, game_over)
                 else:
                     await room_hub.send_to_client(websocket, event)
+            elif isinstance(message, dict) and message.get("type") == "offer_draw":
+                event = await run_in_threadpool(
+                    _process_offer_draw,
+                    room_id,
+                    role,
+                    participant_token,
+                )
+                if event["type"] == "error":
+                    await room_hub.send_to_client(websocket, event)
+                else:
+                    await room_hub.broadcast_room(room_id, event)
+            elif isinstance(message, dict) and message.get("type") == "respond_draw":
+                accept = message.get("accept")
+                if not isinstance(accept, bool):
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "error", "reason": "invalid_draw_response"},
+                    )
+                    continue
+                event = await run_in_threadpool(
+                    _process_draw_response,
+                    room_id,
+                    role,
+                    participant_token,
+                    accept,
+                )
+                if event["type"] == "error":
+                    await room_hub.send_to_client(websocket, event)
+                else:
+                    if event["type"] == "game_over":
+                        await room_hub.stop_timer(room_id)
+                    await room_hub.broadcast_room(room_id, event)
+            elif isinstance(message, dict) and message.get("type") == "resign":
+                event = await run_in_threadpool(
+                    _process_resignation,
+                    room_id,
+                    role,
+                    participant_token,
+                )
+                if event["type"] == "error":
+                    await room_hub.send_to_client(websocket, event)
+                else:
+                    await room_hub.stop_timer(room_id)
+                    await room_hub.broadcast_room(room_id, event)
+            elif isinstance(message, dict) and message.get("type") == "rematch":
+                event = await run_in_threadpool(
+                    _process_rematch,
+                    room_id,
+                    role,
+                    participant_token,
+                )
+                if event["type"] == "error":
+                    await room_hub.send_to_client(websocket, event)
+                else:
+                    await room_hub.broadcast_room(room_id, event)
+                    if (
+                        event["type"] == "room.rematch_started"
+                        and event["room"]["is_public"]
+                    ):
+                        await room_hub.broadcast_lobby(
+                            {"type": "room.created", "room": event["room"]}
+                        )
             else:
                 await room_hub.send_to_client(
                     websocket,

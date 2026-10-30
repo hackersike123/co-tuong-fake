@@ -12,6 +12,7 @@ from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
 
+from .match_service import record_completed_match
 from .room_store import (
     acquire_room_timer_lease,
     delete_room,
@@ -520,6 +521,7 @@ class RoomHub:
                         return
                     await self.stop_room_timers(room_id)
                     if game is not None:
+                        await run_in_threadpool(record_completed_match, room_id)
                         await self.broadcast_room(
                             room_id,
                             {
@@ -594,11 +596,24 @@ class RoomHub:
                         continue
 
                     if timed_out and final_snapshot is not None:
+                        await run_in_threadpool(record_completed_match, room_id)
                         await self.broadcast_room(
                             room_id,
                             {
                                 "type": "game.timeout",
                                 "room_id": room_id,
+                                "game": final_snapshot,
+                            },
+                        )
+                        await self.broadcast_room(
+                            room_id,
+                            {
+                                "type": "game_over",
+                                "room_id": room_id,
+                                "result": final_snapshot.get("result"),
+                                "reason": final_snapshot.get("reason") or "timeout",
+                                "winner": final_snapshot.get("winner"),
+                                "notation": final_snapshot.get("notation", ""),
                                 "game": final_snapshot,
                             },
                         )
