@@ -3,7 +3,7 @@
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .ai_engine import Difficulty, difficulty_settings
-from .xiangqi import Side, STARTING_FEN
+from .xiangqi import Side, STARTING_FEN, XiangqiState
 
 
 class PveDifficultyOption(BaseModel):
@@ -22,7 +22,7 @@ class PveOptionsResponse(BaseModel):
 class PveGameStartRequest(BaseModel):
     player_side: Side = Side.RED
     difficulty: Difficulty = Difficulty.MEDIUM
-    depth: int | None = Field(default=None, ge=1, le=6)
+    depth: int | None = Field(default=None, ge=1, le=5)
 
     @model_validator(mode="after")
     def validate_depth_for_difficulty(self) -> "PveGameStartRequest":
@@ -53,12 +53,39 @@ class PveAiMoveRequest(BaseModel):
     fen: str = Field(min_length=10, max_length=128)
     player_side: Side
     difficulty: Difficulty = Difficulty.MEDIUM
-    depth: int | None = Field(default=None, ge=1, le=6)
+    depth: int | None = Field(default=None, ge=1, le=5)
 
     @model_validator(mode="after")
     def validate_position_and_depth(self) -> "PveAiMoveRequest":
-        from .xiangqi import XiangqiState
+        XiangqiState.from_fen(self.fen)
+        if self.depth is not None:
+            settings = difficulty_settings(self.difficulty)
+            if not settings.min_depth <= self.depth <= settings.max_depth:
+                raise ValueError(
+                    f"{self.difficulty.value} depth must be between "
+                    f"{settings.min_depth} and {settings.max_depth}"
+                )
+        return self
 
+    @property
+    def selected_depth(self) -> int:
+        return self.depth or difficulty_settings(self.difficulty).default_depth
+
+
+class PveSocketMoveRequest(BaseModel):
+    """One Socket-style event payload carried by the existing WebSocket route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    game_id: str = Field(min_length=1, max_length=128)
+    request_id: str = Field(min_length=1, max_length=128)
+    fen: str = Field(min_length=10, max_length=128)
+    player_side: Side = Side.RED
+    difficulty: Difficulty = Difficulty.MEDIUM
+    depth: int | None = Field(default=None, ge=1, le=5)
+
+    @model_validator(mode="after")
+    def validate_position_and_depth(self) -> "PveSocketMoveRequest":
         XiangqiState.from_fen(self.fen)
         if self.depth is not None:
             settings = difficulty_settings(self.difficulty)

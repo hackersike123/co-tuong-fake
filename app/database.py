@@ -36,9 +36,28 @@ def upgrade_sqlite_schema(target_engine=engine) -> None:
         return
 
     with target_engine.begin() as connection:
-        columns = {column["name"] for column in inspect(connection).get_columns("users")}
+        inspector = inspect(connection)
+        columns = {column["name"] for column in inspector.get_columns("users")}
         if "username" not in columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR(32)"))
         connection.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users (username)")
         )
+
+        if inspector.has_table("matches"):
+            match_columns = {
+                column["name"] for column in inspector.get_columns("matches")
+            }
+            migrations = {
+                "is_public": "BOOLEAN NOT NULL DEFAULT 0",
+                "has_password": "BOOLEAN NOT NULL DEFAULT 0",
+                "allow_spectators": "BOOLEAN NOT NULL DEFAULT 0",
+                "access_token_hashes": "TEXT NOT NULL DEFAULT '{}'",
+            }
+            for column_name, column_type in migrations.items():
+                if column_name not in match_columns:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE matches ADD COLUMN {column_name} {column_type}"
+                        )
+                    )
