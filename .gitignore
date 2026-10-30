@@ -1,6 +1,6 @@
 .venv/
 node_modules/
-/.pnpm-store/
+.pnpm-store/
 dist/
 build/
 .cache/
