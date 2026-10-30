@@ -117,3 +117,24 @@ class PveAiMoveResponse(BaseModel):
     score: int
     nodes: int
     cutoffs: int
+    status: str | None = None
+    winner: Side | None = None
+
+
+class PvePlayerMoveRequest(BaseModel):
+    """One player move to validate against the server's Xiangqi rules."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    fen: str = Field(min_length=10, max_length=128)
+    player_side: Side
+    from_square: tuple[int, int] = Field(alias="from")
+    to_square: tuple[int, int] = Field(alias="to")
+
+
+class PvePlayerMoveResponse(BaseModel):
+    fen: str
+    player_side: Side
+    side_to_move: Side
+    status: str
+    winner: Side | None = None

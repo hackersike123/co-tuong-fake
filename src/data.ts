@@ -451,6 +451,48 @@ export function initialPieces(): Piece[] {
   })
 }
 
+const fenPieceTypes: Record<string, PieceType> = {
+  k: "Tướng",
+  a: "Sĩ",
+  b: "Tượng",
+  e: "Tượng",
+  n: "Mã",
+  h: "Mã",
+  r: "Xe",
+  c: "Pháo",
+  p: "Tốt",
+}
+
+export function piecesFromFen(fen: string): Piece[] {
+  const placement = fen.trim().split(/\s+/)[0]
+  const rows = placement?.split("/") || []
+  if (rows.length !== 10) throw new Error("FEN bàn cờ cần có 10 hàng.")
+  const pieces: Piece[] = []
+  rows.forEach((row, y) => {
+    let x = 0
+    for (const code of row) {
+      if (/^[1-9]$/.test(code)) {
+        x += Number(code)
+        continue
+      }
+      const label = fenPieceTypes[code.toLowerCase()]
+      if (!label || x > 8) throw new Error("FEN bàn cờ không hợp lệ.")
+      const side: Side = code === code.toUpperCase() ? "red" : "black"
+      pieces.push({
+        id: `${side}-${x}-${y}`,
+        side,
+        kind: pieceSymbol(side, label),
+        label,
+        x,
+        y,
+      })
+      x += 1
+    }
+    if (x !== 9) throw new Error("Mỗi hàng FEN phải có đúng 9 cột.")
+  })
+  return pieces
+}
+
 export const replayMoves: ChessMove[] = [
   {
     pieceId: "red-c7",

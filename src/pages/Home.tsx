@@ -30,7 +30,6 @@ import { gameHistory, getDemoRankings, playerInitials, resultLabels } from "../d
 import { useExperience } from "../experience/Experience"
 import { RankBadge, RankProgress } from "../rank-ui"
 import { ArenaAtmosphere } from "../experience/effects"
-import { DemoMatchmakingNotice } from "../room-demo"
 
 export default function Home() {
   const { demoElo } = useExperience()
@@ -95,7 +94,6 @@ export default function Home() {
                   Chơi với máy
                 </Button>
               </div>
-              <DemoMatchmakingNotice />
               <div className="hero-community">
                 <div className="mini-avatar-stack">
                   <UserAvatar initials="NL" tone="sage" size="small" elo={2486} />
@@ -103,7 +101,7 @@ export default function Home() {
                   <UserAvatar initials="TP" tone="blue" size="small" elo={2082} />
                 </div>
                 <span>
-                  Cùng <strong>1.248</strong> kỳ hữu · số liệu demo
+                  Sảnh cờ tướng cập nhật theo thời gian thực
                 </span>
               </div>
             </div>
@@ -173,7 +171,7 @@ export default function Home() {
           <section className="surface lobby-preview">
             <SectionTitle
               title="Sảnh đấu đang mở"
-              subtitle="Các bàn cờ mẫu để trải nghiệm."
+              subtitle="Phòng công khai đang chờ đối thủ."
               action="Xem tất cả"
               onAction={() => go("rooms")}
             />
@@ -183,10 +181,10 @@ export default function Home() {
               ))}
             </div>
             <div className="lobby-preview-footer">
-              <OnlineStatus>{roomList.length} phòng mẫu</OnlineStatus>
+              <OnlineStatus>{roomList.length} phòng đang chờ</OnlineStatus>
               <span className="small muted">
                 <span className="live-pulse" />
-                Dữ liệu mô phỏng
+                WebSocket trực tiếp
               </span>
             </div>
           </section>
