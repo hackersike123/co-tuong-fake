@@ -58,8 +58,8 @@ class RoomHub:
                 REDIS_URL,
                 decode_responses=True,
                 socket_connect_timeout=3,
-                socket_timeout=5,
             )
+        await self._event_bus_redis.ping()
         self._subscriber_task = asyncio.create_task(
             self._subscribe_to_room_events(),
             name=f"room-event-subscriber-{self._worker_id}",
@@ -70,17 +70,38 @@ class RoomHub:
         )
 
     async def close(self) -> None:
-        """Stop the Pub/Sub listener and close its Redis connection pool."""
+        """Stop managed background tasks and close the Pub/Sub Redis pool."""
         self._closing = True
+        tasks = [
+            *self._timer_tasks.values(),
+            *self._reconnect_tasks.values(),
+            *self._sender_tasks.values(),
+        ]
         task = self._subscriber_task
         self._subscriber_task = None
         if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            tasks.append(task)
+
+        self._timer_tasks.clear()
+        self._reconnect_tasks.clear()
+        self._sender_tasks.clear()
+        self._outbound_queues.clear()
+        self._send_locks.clear()
+        for background_task in tasks:
+            if background_task is not asyncio.current_task():
+                background_task.cancel()
+        pending = [background_task for background_task in tasks if background_task is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        async with self._lock:
+            self._lobby_clients.clear()
+            self._room_clients.clear()
+            self._room_participant_tokens.clear()
+            self._active_connection_count = 0
+
         self._pubsub_ready = False
+        self._publish_failed = False
         client = self._event_bus_redis
         self._event_bus_redis = None
         if client is not None:
