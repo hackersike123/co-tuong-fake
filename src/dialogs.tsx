@@ -19,7 +19,7 @@ import {
   Volume2,
 } from "lucide-react"
 import { Dialog as Modal, Heading, IconAction, PieceGlyph, UserAvatar } from "./components"
-import { useApp, type ModalName } from "./context"
+import { useApp, type ModalName, type RoomAccess } from "./context"
 import { playerInitials, type Room } from "./data"
 import { ProfileEditor } from "./experience/ProfileEditor"
 import { useExperience, type MotionPreference } from "./experience/Experience"
@@ -48,7 +48,7 @@ export function GlobalDialogs({
 
 function CreateRoomDialog({ onClose }: { onClose: () => void }) {
   const { demoElo } = useExperience()
-  const { username, profileTone, setRoomList, setActiveRoom, setIsHost, go, notify } =
+  const { username, profileTone, setRoomList, setActiveRoom, setRoomAccess, setIsHost, request, go, notify } =
     useApp()
   const [name, setName] = useState("")
   const [seconds, setSeconds] = useState(30)
@@ -57,7 +57,7 @@ function CreateRoomDialog({ onClose }: { onClose: () => void }) {
   const [spectators, setSpectators] = useState(true)
   const [error, setError] = useState("")
   const [pending, setPending] = useState(false)
-  function create(e: React.FormEvent) {
+  async function create(e: React.FormEvent) {
     e.preventDefault()
     if (name.trim().length < 3) {
       setError("Tên phòng cần có ít nhất 3 ký tự.")
@@ -69,27 +69,39 @@ function CreateRoomDialog({ onClose }: { onClose: () => void }) {
     }
     setError("")
     setPending(true)
-    setTimeout(() => {
+    try {
+      const access = await request<RoomAccess>("room.create", {
+        room_name: name.trim(),
+        host_name: username,
+        time_per_move: seconds,
+        is_public: privacy === "public",
+        password: privacy === "private" ? password : undefined,
+        allow_spectators: spectators,
+      })
       const room: Room = {
-        id: `KD${Math.floor(1000 + Math.random() * 9000)}`,
-        name: name.trim(),
-        host: username,
+        id: String(access.id),
+        name: access.room_name,
+        host: access.host_name,
         ownedByMe: true,
-        initials: playerInitials(username),
+        initials: playerInitials(access.host_name),
         elo: demoElo,
-        seconds,
-        players: 1,
-        private: privacy === "private",
-        spectators,
+        seconds: access.timer_seconds,
+        players: access.player_count,
+        private: !access.is_public,
+        spectators: access.allow_spectators,
         tone: profileTone,
       }
       setRoomList((list) => [room, ...list])
       setActiveRoom(room)
+      setRoomAccess(access)
       setIsHost(true)
-      setPending(false)
       go("waiting")
-      notify(`Đã tạo phòng mẫu ${room.id} trên thiết bị. Chưa ghép trận với máy chủ.`)
-    }, 700)
+      notify(`Đã tạo phòng ${room.id}.`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không thể tạo phòng.")
+    } finally {
+      setPending(false)
+    }
   }
   return (
     <Modal isOpen onClose={onClose} title="Tạo một bàn cờ mới" size="medium">
@@ -201,17 +213,14 @@ function CreateRoomDialog({ onClose }: { onClose: () => void }) {
             {pending ? "Đang tạo phòng..." : "Tạo phòng"}
           </Button>
         </div>
-        <div className="form-help">
-          Bạn là chủ phòng, cầm quân Đỏ và đi trước. Phòng và mật khẩu chỉ được
-          mô phỏng trong bản mẫu.
-        </div>
+          <div className="form-help">Bạn là chủ phòng, cầm quân Đỏ và đi trước.</div>
       </form>
     </Modal>
   )
 }
 
 function PasswordDialog({ onClose }: { onClose: () => void }) {
-  const { activeRoom, go } = useApp()
+  const { activeRoom, joinRoomWithPassword } = useApp()
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [pending, setPending] = useState(false)
@@ -227,7 +236,7 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
       </div>
       <form
         className="form-stack"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault()
           if (password.length < 4) {
             setError("Mật khẩu cần có ít nhất 4 ký tự. Vui lòng thử lại.")
@@ -235,7 +244,13 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
           }
           setPending(true)
           setError("")
-          setTimeout(() => go("waiting"), 650)
+          try {
+            await joinRoomWithPassword(password)
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : "Không thể vào phòng.")
+          } finally {
+            setPending(false)
+          }
         }}
       >
         <InputField
@@ -268,18 +283,36 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
         >
           {pending ? "Đang vào phòng..." : "Vào phòng"}
         </Button>
-        <div className="small muted">
-          Mật khẩu được kiểm tra định dạng để minh họa luồng, không xác thực qua
-          máy chủ.
-        </div>
+        <div className="small muted">Mật khẩu được xác thực bởi máy chủ.</div>
       </form>
     </Modal>
   )
 }
 
 function ShareDialog({ onClose }: { onClose: () => void }) {
-  const { activeRoom, notify } = useApp()
-  const link = `${window.location.origin}${window.location.pathname}#phong-cho?ma=${activeRoom.id}`
+  const { activeRoom, roomAccess, request, notify } = useApp()
+  const [inviteEmail, setInviteEmail] = useState("")
+  const [emailPending, setEmailPending] = useState(false)
+  const [emailError, setEmailError] = useState("")
+  const link = roomAccess?.join_url || `${window.location.origin}/room/${activeRoom.id}`
+  async function sendEmailInvite() {
+    if (!roomAccess || !inviteEmail.trim()) return
+    setEmailPending(true)
+    setEmailError("")
+    try {
+      await request("room.invite", {
+        room_id: roomAccess.id,
+        participant_token: roomAccess.participant_token,
+        email: inviteEmail.trim(),
+      })
+      notify(`Đã gửi lời mời tới ${inviteEmail.trim()}.`)
+      setInviteEmail("")
+    } catch (error) {
+      setEmailError(error instanceof Error ? error.message : "Không gửi được thư mời.")
+    } finally {
+      setEmailPending(false)
+    }
+  }
   async function copy(value: string, label: string) {
     try {
       await navigator.clipboard.writeText(value)
@@ -371,6 +404,25 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
           />
         }
       />
+      <div className="email-invite-row">
+        <InputField
+          label="Gửi lời mời qua email"
+          aria-label="Email bạn bè"
+          type="email"
+          value={inviteEmail}
+          onChange={setInviteEmail}
+          placeholder="ban@example.com"
+          autoComplete="email"
+        />
+        <Button
+          variant="neutral"
+          disabled={!inviteEmail.trim() || emailPending || roomAccess?.role !== "player1"}
+          onClick={() => void sendEmailInvite()}
+        >
+          {emailPending ? "Đang gửi..." : "Gửi thư mời"}
+        </Button>
+      </div>
+      {emailError && <div className="error-message" role="alert">{emailError}</div>}
       <div className="share-options">
         {[
           { name: "Facebook", text: "f", tone: "blue" },
@@ -467,9 +519,8 @@ function RulesDialog({ onClose }: { onClose: () => void }) {
       <div className="rules-prototype-note">
         <ShieldCheck size={17} />
         <span>
-          Bạn đang trải nghiệm prototype. Di chuyển quân, đối thủ, OTP và trạng
-          thái phòng đều được mô phỏng; không có kết nối máy chủ hay bộ máy luật
-          cờ.
+          Nước đi PvP và PvE được máy chủ kiểm tra bằng bộ luật cờ tướng trước
+          khi cập nhật trạng thái bàn cờ.
         </span>
       </div>
       <div className="form-actions">
@@ -548,8 +599,8 @@ function TipsDialog({ onClose }: { onClose: () => void }) {
       <div className="info-message">
         <ShieldCheck size={17} />
         <span>
-          Đây là gợi ý chiến thuật, không phải nước đi bắt buộc. Bàn cờ demo
-          chưa kiểm tra đầy đủ luật cờ thực tế.
+          Đây là gợi ý chiến thuật, không phải nước đi bắt buộc. Máy chủ kiểm
+          tra luật cờ khi xác nhận từng nước đi.
         </span>
       </div>
     </Modal>

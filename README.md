@@ -1,9 +1,31 @@
 # Kỳ Tiên Hội — Frontend và Backend
 
-Repository này gồm giao diện React/Vite trong `src/` và API FastAPI trong `app/`.
-Frontend hiện vẫn là prototype: các luồng đăng nhập, phòng, chat, ghép trận và
-nước đi được mô phỏng trong trình duyệt. Chạy backend không tự động kết nối UI;
-`src/config/connection.ts` giữ kết nối ở chế độ demo.
+Repository này gồm giao diện React/Vite trong `src/` và backend FastAPI trong
+`app/`. Frontend gửi lệnh tài khoản, phòng và PvE qua raw WebSocket; lobby và
+ván PvP nhận snapshot, nước đi và timer qua các WebSocket chuyên biệt. Các HTTP
+route hiện có vẫn được giữ để tương thích với client cũ. `/api/health` và trang
+OpenAPI tiếp tục dùng HTTP.
+
+## WebSocket client protocol
+
+Đặt `VITE_API_BASE_URL` trong `.env` (mặc định `http://127.0.0.1:8000`). Các
+lệnh tài khoản/phòng/PvE dùng `ws(s)://<backend>/api/v1/ws` theo dạng:
+
+```json
+{"id":"request-1","event":"room.create","data":{"room_name":"Bàn cờ","host_name":"Kỳ hữu"}}
+```
+
+Server trả về cùng `id`, `event` kết thúc bằng `.result`, `ok` và `data` hoặc
+`error`. Lobby dùng `/api/v1/rooms/ws`; trận PvP dùng
+`/api/v1/rooms/{room_id}/ws?participant_token=...`. Nước đi PvP và đồng hồ được
+xác thực/phát từ backend. PvE dùng `pve.start`, `pve.player_move` và
+`pve.ai_move` trên RPC WebSocket; backend kiểm tra luật trước khi áp dụng nước
+đi.
+
+GitHub Actions tự chạy toàn bộ Python tests, compile backend, TypeScript
+typecheck và Vite production build cho pull request vào `main` hoặc `developer`.
+Để chặn merge khi test lỗi, bật branch protection cho `main` và đặt hai check
+`Backend tests` và `Frontend build and typecheck` làm required status checks.
 
 ## Chạy frontend trên Windows
 

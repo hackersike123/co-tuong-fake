@@ -2,6 +2,7 @@
 
 import logging
 import secrets
+import time
 from typing import Any
 from urllib.parse import urlencode
 
@@ -1214,6 +1215,39 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
                 await room_hub.send_to_client(websocket, {"type": "pong"})
+            elif isinstance(message, dict) and message.get("type") == "chat_message":
+                raw_text = message.get("text")
+                if not isinstance(raw_text, str):
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "error", "reason": "invalid_chat_payload"},
+                    )
+                    continue
+                chat_text = "".join(char for char in raw_text if char.isprintable()).strip()
+                if not chat_text or len(chat_text) > 500:
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "error", "reason": "invalid_chat_payload"},
+                    )
+                    continue
+                sender_name = message.get("sender_name")
+                if not isinstance(sender_name, str) or not sender_name.strip():
+                    sender_name = {
+                        "player1": room["host_name"],
+                        "player2": "Người chơi 2",
+                        "spectator": "Khán giả",
+                    }.get(role, "Kỳ hữu")
+                await room_hub.broadcast_room(
+                    room_id,
+                    {
+                        "type": "chat_message",
+                        "message_id": secrets.token_urlsafe(9),
+                        "role": role,
+                        "sender_name": sender_name.strip()[:80],
+                        "text": chat_text,
+                        "sent_at": int(time.time() * 1000),
+                    },
+                )
             elif isinstance(message, dict) and message.get("type") == "ready":
                 ready = message.get("ready", True)
                 if not isinstance(ready, bool):
