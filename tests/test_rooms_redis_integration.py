@@ -41,6 +41,7 @@ def test_public_room_lifecycle_uses_configured_redis(
         room, host_token = room_store.create_room("Redis integration room")
         room_id = room["id"]
         assert room_id == 1
+        assert room["room_id"] == room_id
         assert room["player_count"] == 1
         assert room_store.list_public_rooms()[0]["id"] == room_id
 
@@ -63,6 +64,27 @@ def test_public_room_lifecycle_uses_configured_redis(
         assert room_store.delete_room(room_id)
         assert room_store.get_room(room_id) is None
         assert room_store.list_public_rooms() == []
+
+        private_room, _ = room_store.create_room(
+            "Private Redis room",
+            is_public=False,
+            password_hash="hashed-room-password",
+            allow_spectators=False,
+        )
+        private_room_id = private_room["id"]
+        assert private_room_id == 2
+        assert private_room["room_id"] == private_room_id
+        assert private_room["room_uuid"] != room["room_uuid"]
+        assert private_room["visibility"] == "private"
+        assert private_room["has_password"] is True
+        assert room_store.list_public_rooms() == []
+        assert room_store.join_room(private_room_id, "private-opponent") == "player2"
+        assert (
+            room_store.join_room(private_room_id, "blocked-spectator")
+            == "spectators_disabled"
+        )
+        assert room_store.get_room(private_room_id)["spectator_count"] == 0
+        assert room_store.delete_room(private_room_id)
     finally:
         for key in room_store.redis_client.scan_iter(match=f"{prefix}:*"):
             room_store.redis_client.delete(key)

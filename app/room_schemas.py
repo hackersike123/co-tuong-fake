@@ -2,19 +2,32 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 class RoomCreateRequest(BaseModel):
-    """Input used to create a public waiting room."""
+    """Input used to create a waiting room with lobby and access settings."""
 
-    name: str = Field(min_length=1, max_length=80, examples=["Ván cờ cuối tuần"])
+    model_config = ConfigDict(populate_by_name=True)
+
+    room_name: str = Field(
+        min_length=1,
+        max_length=80,
+        validation_alias=AliasChoices("room_name", "name"),
+        examples=["Weekend Xiangqi"],
+    )
     host_name: str = Field(default="Khách", min_length=1, max_length=80, examples=["Minh Anh"])
-    timer_seconds: Literal[15, 30, 60] = 30
+    time_per_move: Literal[15, 30, 60] = Field(
+        default=30,
+        validation_alias=AliasChoices("time_per_move", "timer_seconds"),
+    )
+    is_public: bool = True
+    password: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
+    allow_spectators: bool = True
 
-    @field_validator("name")
+    @field_validator("room_name")
     @classmethod
-    def trim_name(cls, value: str) -> str:
+    def trim_room_name(cls, value: str) -> str:
         name = value.strip()
         if not name:
             raise ValueError("Room name cannot be blank")
@@ -30,10 +43,11 @@ class RoomCreateRequest(BaseModel):
 
 
 class RoomJoinRequest(BaseModel):
-    """Optional participant or invitation token used to join a room."""
+    """Optional room password, invitation, or participant token."""
 
     participant_token: str | None = Field(default=None, min_length=32, max_length=128)
     invite_token: str | None = Field(default=None, min_length=32, max_length=128)
+    password: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
 
 
 class RoomCodeJoinRequest(RoomJoinRequest):
@@ -55,17 +69,24 @@ class RoomInviteRequest(RoomActionRequest):
 
 
 class RoomSummary(BaseModel):
-    """Public room information safe to expose in the lobby."""
+    """Room information safe to expose in the lobby or join response."""
 
     id: int
+    room_id: int
+    room_uuid: str
+    room_name: str
     name: str
     host_name: str
-    visibility: Literal["public"]
+    visibility: Literal["public", "private"]
+    is_public: bool
+    has_password: bool
+    allow_spectators: bool
     status: Literal["waiting", "playing", "finished"]
     player_count: int
     spectator_count: int
     created_at: int
     timer_seconds: Literal[15, 30, 60]
+    time_per_move: Literal[15, 30, 60]
 
 
 class RoomGameSnapshot(BaseModel):

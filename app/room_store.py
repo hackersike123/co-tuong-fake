@@ -3,6 +3,7 @@
 import secrets
 import time
 from typing import Any
+from uuid import uuid4
 
 from redis import Redis
 
@@ -38,6 +39,9 @@ if status == 'waiting' then
         redis.call('HSET', KEYS[2], ARGV[1], 'player2')
         return 'player2'
     end
+end
+if redis.call('HGET', KEYS[1], 'allow_spectators') == 'false' then
+    return -2
 end
 redis.call('HSET', KEYS[2], ARGV[1], 'spectator')
 redis.call('SADD', KEYS[3], ARGV[1])
@@ -431,11 +435,16 @@ def create_room(
     name: str,
     host_name: str = "Khách",
     timer_seconds: int = 30,
+    *,
+    is_public: bool = True,
+    password_hash: str | None = None,
+    allow_spectators: bool = True,
 ) -> tuple[dict[str, Any], str]:
-    """Create a public waiting room and assign its creator to player slot one."""
+    """Create a waiting room and assign its creator to player slot one."""
     if timer_seconds not in {15, 30, 60}:
         raise ValueError("Room timer must be 15, 30, or 60 seconds")
     room_id = int(redis_client.incr(ROOM_SEQUENCE_KEY))
+    room_uuid = uuid4().hex
     host_token = secrets.token_urlsafe(32)
     invite_token = secrets.token_urlsafe(32)
     created_at = int(time.time())
@@ -445,10 +454,16 @@ def create_room(
         _room_key(room_id),
         mapping={
             "id": room_id,
+            "room_uuid": room_uuid,
             "name": name,
+            "room_name": name,
             "host_name": host_name,
             "timer_seconds": timer_seconds,
-            "visibility": "public",
+            "time_per_move": timer_seconds,
+            "visibility": "public" if is_public else "private",
+            "is_public": "true" if is_public else "false",
+            "password_hash": password_hash or "",
+            "allow_spectators": "true" if allow_spectators else "false",
             "status": "waiting",
             "host_token": host_token,
             "invite_token": invite_token,
@@ -458,7 +473,8 @@ def create_room(
         },
     )
     pipeline.hset(_participants_key(room_id), host_token, "player1")
-    pipeline.zadd(PUBLIC_ROOMS_KEY, {str(room_id): created_at})
+    if is_public:
+        pipeline.zadd(PUBLIC_ROOMS_KEY, {str(room_id): created_at})
     pipeline.execute()
 
     room = get_room(room_id)
@@ -500,18 +516,43 @@ def get_room(room_id: int) -> dict[str, Any] | None:
     if not values:
         return None
 
+    room_uuid = values.get("room_uuid")
+    if not room_uuid:
+        candidate = uuid4().hex
+        redis_client.hsetnx(_room_key(room_id), "room_uuid", candidate)
+        room_uuid = redis_client.hget(_room_key(room_id), "room_uuid") or candidate
+    stored_is_public = values.get("is_public")
+    is_public = (
+        stored_is_public != "false"
+        if stored_is_public is not None
+        else values.get("visibility", "public") == "public"
+    )
+    timer_seconds = int(values.get("time_per_move", values.get("timer_seconds", 30)))
     player_count = 1 + int(bool(values.get("player2_token")))
     return {
         "id": int(values["id"]),
+        "room_id": int(values["id"]),
+        "room_uuid": str(room_uuid),
+        "room_name": values.get("room_name", values["name"]),
         "name": values["name"],
         "host_name": values.get("host_name", "Khách"),
-        "timer_seconds": int(values.get("timer_seconds", 30)),
-        "visibility": values["visibility"],
+        "timer_seconds": timer_seconds,
+        "time_per_move": timer_seconds,
+        "visibility": "public" if is_public else "private",
+        "is_public": is_public,
+        "has_password": bool(values.get("password_hash")),
+        "allow_spectators": values.get("allow_spectators", "true") != "false",
         "status": values["status"],
         "player_count": player_count,
         "spectator_count": int(redis_client.scard(_spectators_key(room_id))),
         "created_at": int(values["created_at"]),
     }
+
+
+def get_room_password_hash(room_id: int) -> str | None:
+    """Return a stored room password hash without exposing it in room summaries."""
+    password_hash = redis_client.hget(_room_key(room_id), "password_hash")
+    return str(password_hash) if password_hash else None
 
 
 def list_public_rooms(limit: int = 100) -> list[dict[str, Any]]:
@@ -521,7 +562,7 @@ def list_public_rooms(limit: int = 100) -> list[dict[str, Any]]:
     for room_id_text in room_ids:
         room_id = int(room_id_text)
         room = get_room(room_id)
-        if room is None or room["status"] != "waiting":
+        if room is None or not room["is_public"] or room["status"] != "waiting":
             redis_client.zrem(PUBLIC_ROOMS_KEY, room_id_text)
             continue
         rooms.append(room)
@@ -540,6 +581,8 @@ def join_room(room_id: int, participant_token: str) -> str | None:
     )
     if result == -1:
         return None
+    if result == -2:
+        return "spectators_disabled"
     return str(result)
 
 
