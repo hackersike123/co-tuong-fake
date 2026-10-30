@@ -130,7 +130,9 @@ username column to an existing SQLite demo database without deleting accounts.
 ```
 
 The server creates the account with `is_active=false`, generates a random
-six-digit code, stores it in Redis for 300 seconds, and sends it through SMTP.
+six-digit code, stores a salted hash in `email_verification_otps` for 300
+seconds, and sends the raw code through SMTP. Verification reads and consumes
+the code from the database before activating the account.
 Passwords are stored as Argon2 hashes. The registration response never contains
 the password or its hash.
 

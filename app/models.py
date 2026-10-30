@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, false, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -41,3 +41,21 @@ class UserSession(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class EmailVerificationOTP(Base):
+    """Short-lived, one-time email activation code stored as a salted hash."""
+
+    __tablename__ = "email_verification_otps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    salt: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
