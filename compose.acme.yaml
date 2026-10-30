@@ -1,0 +1,10 @@
+services:
+  nginx:
+    ports: !override
+      - "0.0.0.0:80:80"
+    environment:
+      NGINX_SERVER_NAME: "${NGINX_SERVER_NAME:?Set NGINX_SERVER_NAME to a domain you control}"
+      NGINX_ENVSUBST_FILTER: "^(NGINX_SERVER_NAME)$"
+    volumes: !override
+      - ./nginx/templates/acme-bootstrap.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - "${CERTBOT_WEBROOT_DIR:?Set CERTBOT_WEBROOT_DIR outside the repository}:/var/www/certbot:ro"
