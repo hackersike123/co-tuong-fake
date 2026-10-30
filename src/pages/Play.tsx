@@ -1052,11 +1052,16 @@ export function Game() {
           notify("Không đọc được sự kiện từ máy chủ trận đấu.", "error")
         }
       }
-      socket.onclose = () => {
-        if (!cancelled && !ended.current) {
-          setDisconnected(true)
-          retryTimer = setTimeout(connect, Math.min(1000 * 2 ** attempt++, 15000))
+      socket.onclose = (event) => {
+        if (cancelled || ended.current) return
+        if ([4401, 4403, 4404, 4409].includes(event.code)) {
+          setRoomAccess(null)
+          notify(event.reason || "Phiên phòng đã hết hiệu lực.", "error")
+          go("rooms")
+          return
         }
+        setDisconnected(true)
+        retryTimer = setTimeout(connect, Math.min(1000 * 2 ** attempt++, 15000))
       }
     }
     const connectTimer = setTimeout(connect, 0)
