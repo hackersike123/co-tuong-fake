@@ -10,9 +10,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-from app import email_service, room_store
+from app import email_service, match_service, room_store
+from app.database import Base
 from app.email_service import EmailConfigurationError, EmailDeliveryError
+from app.models import Match
 from app.routers import rooms as room_routes
 from app.routers.rooms import router as rooms_router
 from app.security import verify_password
@@ -25,6 +30,18 @@ def rooms_client(
 ) -> Iterator[tuple[TestClient, fakeredis.FakeRedis]]:
     fake_redis = fakeredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(room_store, "redis_client", fake_redis)
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(test_engine)
+    test_session_factory = sessionmaker(
+        bind=test_engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    monkeypatch.setattr(match_service, "SessionLocal", test_session_factory)
 
     app = FastAPI()
     app.include_router(rooms_router, prefix="/api/v1/rooms")
@@ -32,6 +49,7 @@ def rooms_client(
         yield client, fake_redis
 
     fake_redis.flushdb()
+    test_engine.dispose()
 
 
 def _receive_socket_event(websocket: Any, event_type: str) -> dict[str, Any]:
@@ -48,6 +66,21 @@ def _ready_player_two(client: TestClient, participant_token: str, room_id: int =
         json={"participant_token": participant_token, "ready": True},
     )
     assert response.status_code == 200, response.text
+
+
+def _create_started_room(client: TestClient, room_name: str = "Finished game") -> tuple[dict[str, Any], dict[str, Any]]:
+    host = client.post(
+        "/api/v1/rooms/",
+        json={"room_name": room_name, "host_name": "Red player", "time_per_move": 60},
+    ).json()
+    opponent = client.post(f"/api/v1/rooms/{host['room_id']}/join", json={}).json()
+    _ready_player_two(client, opponent["participant_token"], host["room_id"])
+    started = client.post(
+        f"/api/v1/rooms/{host['room_id']}/start",
+        json={"participant_token": host["participant_token"]},
+    )
+    assert started.status_code == 200, started.text
+    return host, opponent
 
 
 def test_start_initializes_server_authoritative_board_and_clocks(
@@ -136,6 +169,168 @@ def test_make_move_is_server_validated_and_broadcast_to_room(
             assert red_event["game"]["fen"] != STARTING_FEN
 
 
+def test_resignation_saves_match_and_move_notation_once(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host, opponent = _create_started_room(client, "Saved result")
+    room_id = host["room_id"]
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/{room_id}/ws?participant_token={host['participant_token']}"
+    ) as red_ws:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{room_id}/ws?participant_token={opponent['participant_token']}"
+        ) as black_ws:
+            assert red_ws.receive_json()["game"]["status"] == "playing"
+            assert black_ws.receive_json()["game"]["status"] == "playing"
+
+            red_ws.send_json({"type": "make_move", "from": [9, 1], "to": [7, 0]})
+            _receive_socket_event(red_ws, "move_made")
+            _receive_socket_event(black_ws, "move_made")
+            black_ws.send_json({"type": "make_move", "from": [0, 1], "to": [2, 0]})
+            _receive_socket_event(red_ws, "move_made")
+            _receive_socket_event(black_ws, "move_made")
+
+            black_ws.send_json({"type": "resign"})
+            red_result = _receive_socket_event(red_ws, "game_over")
+            black_result = _receive_socket_event(black_ws, "game_over")
+            assert red_result == black_result
+
+    assert red_result["result"] == "resignation"
+    assert red_result["reason"] == "resignation"
+    assert red_result["winner"] == "w"
+    assert red_result["notation"] == "1. b9-a7 1... b0-a2"
+
+    history = client.get(f"/api/v1/rooms/{room_id}/matches")
+    assert history.status_code == 200
+    assert len(history.json()) == 1
+    assert history.json()[0]["result"] == "resignation"
+    assert history.json()[0]["notation"] == "1. b9-a7 1... b0-a2"
+
+    match_service.record_completed_match(room_id)
+    with match_service.SessionLocal() as session:
+        assert len(session.scalars(select(Match)).all()) == 1
+
+
+def test_checkmate_broadcasts_game_over_and_saves_final_move(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, fake_redis = rooms_client
+    host, opponent = _create_started_room(client, "Checkmate result")
+    room_id = host["room_id"]
+    fake_redis.hset(
+        f"room:{room_id}",
+        mapping={
+            "game_fen": "3Rk1R2/4R4/9/9/9/9/9/9/9/3K5 w - - 0 1",
+            "game_version": 0,
+            "side_to_move": "w",
+            "red_time_ms": 60_000,
+            "black_time_ms": 60_000,
+            "game_paused": "false",
+            "game_notation": "",
+        },
+    )
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/{room_id}/ws?participant_token={host['participant_token']}"
+    ) as red_ws:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{room_id}/ws?participant_token={opponent['participant_token']}"
+        ) as black_ws:
+            red_ws.receive_json()
+            black_ws.receive_json()
+            red_ws.send_json({"type": "make_move", "from": [1, 4], "to": [2, 4]})
+            _receive_socket_event(red_ws, "move_made")
+            result = _receive_socket_event(black_ws, "game_over")
+
+    assert result["result"] == "checkmate"
+    assert result["winner"] == "w"
+    assert result["notation"] == "1. e1-e2"
+    history = client.get(f"/api/v1/rooms/{room_id}/matches").json()
+    assert history[0]["result"] == "checkmate"
+    assert history[0]["notation"] == "1. e1-e2"
+
+
+def test_draw_offer_can_be_declined_then_accepted(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host, opponent = _create_started_room(client, "Agreed draw")
+    room_id = host["room_id"]
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/{room_id}/ws?participant_token={host['participant_token']}"
+    ) as red_ws:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{room_id}/ws?participant_token={opponent['participant_token']}"
+        ) as black_ws:
+            red_ws.receive_json()
+            black_ws.receive_json()
+            red_ws.send_json({"type": "offer_draw"})
+            assert _receive_socket_event(red_ws, "draw_offered")["role"] == "player1"
+            assert _receive_socket_event(black_ws, "draw_offered")["role"] == "player1"
+
+            black_ws.send_json({"type": "respond_draw", "accept": False})
+            assert _receive_socket_event(red_ws, "draw_declined")["role"] == "player2"
+            assert _receive_socket_event(black_ws, "draw_declined")["role"] == "player2"
+
+            red_ws.send_json({"type": "offer_draw"})
+            _receive_socket_event(red_ws, "draw_offered")
+            _receive_socket_event(black_ws, "draw_offered")
+            black_ws.send_json({"type": "respond_draw", "accept": True})
+            red_result = _receive_socket_event(red_ws, "game_over")
+            black_result = _receive_socket_event(black_ws, "game_over")
+
+    assert red_result == black_result
+    assert red_result["result"] == "agreement"
+    assert red_result["winner"] is None
+    history = client.get(f"/api/v1/rooms/{room_id}/matches").json()
+    assert len(history) == 1
+    assert history[0]["reason"] == "draw_agreement"
+
+
+def test_rematch_waits_for_both_players_and_starts_a_new_round(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host, opponent = _create_started_room(client, "Rematch")
+    room_id = host["room_id"]
+    with client.websocket_connect(
+        f"/api/v1/rooms/{room_id}/ws?participant_token={host['participant_token']}"
+    ) as red_ws:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{room_id}/ws?participant_token={opponent['participant_token']}"
+        ) as black_ws:
+            red_ws.receive_json()
+            black_ws.receive_json()
+            red_ws.send_json({"type": "resign"})
+            _receive_socket_event(red_ws, "game_over")
+            _receive_socket_event(black_ws, "game_over")
+
+            red_ws.send_json({"type": "rematch"})
+            red_request = _receive_socket_event(red_ws, "room.rematch_requested")
+            black_request = _receive_socket_event(black_ws, "room.rematch_requested")
+            assert red_request["role"] == black_request["role"] == "player1"
+            assert room_store.get_room(room_id)["status"] == "finished"
+
+            black_ws.send_json({"type": "rematch"})
+            red_rematch = _receive_socket_event(red_ws, "room.rematch_started")
+            black_rematch = _receive_socket_event(black_ws, "room.rematch_started")
+            assert red_rematch["room"]["status"] == "waiting"
+            assert black_rematch["room"]["player2_ready"] is False
+
+            _ready_player_two(client, opponent["participant_token"], room_id)
+            started = client.post(
+                f"/api/v1/rooms/{room_id}/start",
+                json={"participant_token": host["participant_token"]},
+            )
+            assert started.status_code == 200
+            game = client.get(f"/api/v1/rooms/{room_id}/game").json()
+            assert game["round_number"] == 2
+            assert game["notation"] == ""
+
+
 def test_spectator_cannot_submit_a_move(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:
@@ -197,6 +392,10 @@ def test_authoritative_timer_finishes_game_when_active_clock_expires(
     assert timeout_event["game"]["result"] == "timeout"
     assert timeout_event["game"]["winner"] == "b"
     assert timeout_event["game"]["red_time_ms"] == 0
+    history = client.get("/api/v1/rooms/1/matches")
+    assert history.status_code == 200
+    assert len(history.json()) == 1
+    assert history.json()[0]["result"] == "timeout"
 
 
 def test_public_room_roles_start_and_host_deletion(

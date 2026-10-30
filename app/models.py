@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, false, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base
@@ -59,3 +59,26 @@ class EmailVerificationOTP(Base):
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
+class Match(Base):
+    """A completed room game and its replayable coordinate notation."""
+
+    __tablename__ = "matches"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    match_key: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
+    room_id: Mapped[int] = mapped_column(nullable=False, index=True)
+    room_uuid: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    round_number: Mapped[int] = mapped_column(nullable=False)
+    room_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    red_player: Mapped[str] = mapped_column(String(80), nullable=False)
+    black_player: Mapped[str] = mapped_column(String(80), nullable=False)
+    result: Mapped[str] = mapped_column(String(40), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(40))
+    winner: Mapped[str | None] = mapped_column(String(1))
+    notation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    final_fen: Mapped[str] = mapped_column(Text, nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
