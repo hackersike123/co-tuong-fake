@@ -8,10 +8,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from redis.exceptions import RedisError
 from sqlalchemy import func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..database import get_session
+from ..email_verification import clear_email_otp, issue_email_otp, verify_email_otp
 from ..email_service import (
     EmailConfigurationError,
     EmailDeliveryError,
@@ -21,12 +22,9 @@ from ..email_service import (
 )
 from ..models import User, UserSession
 from ..otp_store import (
-    clear_email_otp,
     clear_password_reset_otp,
     consume_password_reset_otp,
-    issue_email_otp,
     issue_password_reset_otp,
-    verify_email_otp,
 )
 from ..schemas import (
     ForgotPasswordRequest,
@@ -254,7 +252,7 @@ def logout(
     summary="Register a player account and send an email verification code",
 )
 def register_account(payload: RegisterRequest, session: SessionDep) -> User:
-    """Create an inactive account, store an OTP, and send it by email."""
+    """Create an inactive account, store a database OTP, and email it."""
     email = str(payload.email).strip().lower()
 
     try:
@@ -286,6 +284,8 @@ def register_account(payload: RegisterRequest, session: SessionDep) -> User:
     session.add(user)
 
     try:
+        session.flush()
+        otp = issue_email_otp(session, user.id)
         session.commit()
     except IntegrityError as exc:
         # The database constraint also protects against simultaneous registrations.
@@ -294,23 +294,19 @@ def register_account(payload: RegisterRequest, session: SessionDep) -> User:
             status_code=status.HTTP_409_CONFLICT,
             detail="Email or username is already registered",
         ) from exc
-
-    session.refresh(user)
-
-    try:
-        otp = issue_email_otp(user.id)
-    except RedisError as exc:
-        _delete_pending_user(session, user)
-        logger.exception("Could not store email verification code in Redis")
+    except SQLAlchemyError as exc:
+        session.rollback()
+        logger.exception("Could not store email verification code in the database")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Verification service is temporarily unavailable",
         ) from exc
 
+    session.refresh(user)
+
     try:
         send_verification_email(email, otp)
     except (EmailConfigurationError, EmailDeliveryError) as exc:
-        _clear_otp_after_error(user.id)
         _delete_pending_user(session, user)
         logger.exception("Could not send account verification email")
         raise HTTPException(
@@ -327,7 +323,7 @@ def register_account(payload: RegisterRequest, session: SessionDep) -> User:
     summary="Verify an email address and activate the account",
 )
 def verify_account_email(payload: VerifyEmailRequest, session: SessionDep) -> User:
-    """Activate an inactive account when its email OTP is valid."""
+    """Activate an inactive account when its database-stored email OTP is valid."""
     email = str(payload.email).strip().lower()
     user = session.scalar(select(User).where(User.email == email))
     if user is None:
@@ -339,9 +335,10 @@ def verify_account_email(payload: VerifyEmailRequest, session: SessionDep) -> Us
         return user
 
     try:
-        result = verify_email_otp(user.id, payload.otp)
-    except RedisError as exc:
-        logger.exception("Could not verify email code in Redis")
+        result = verify_email_otp(session, user.id, payload.otp)
+    except SQLAlchemyError as exc:
+        session.rollback()
+        logger.exception("Could not verify email code in the database")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Verification service is temporarily unavailable",
@@ -364,11 +361,6 @@ def verify_account_email(payload: VerifyEmailRequest, session: SessionDep) -> Us
     except Exception:
         session.rollback()
         raise
-
-    try:
-        clear_email_otp(user.id)
-    except RedisError:
-        logger.exception("Could not delete a consumed email verification code")
 
     session.refresh(user)
     return user
@@ -474,13 +466,6 @@ def reset_password(
     return MessageResponse(message="Password reset successfully")
 
 
-def _clear_otp_after_error(user_id: int) -> None:
-    try:
-        clear_email_otp(user_id)
-    except RedisError:
-        logger.exception("Could not clear an unsent email verification code")
-
-
 def _clear_password_reset_otp_after_error(email: str) -> None:
     try:
         clear_password_reset_otp(email)
@@ -490,6 +475,7 @@ def _clear_password_reset_otp_after_error(email: str) -> None:
 
 def _delete_pending_user(session: Session, user: User) -> None:
     try:
+        clear_email_otp(session, user.id)
         session.delete(user)
         session.commit()
     except Exception:

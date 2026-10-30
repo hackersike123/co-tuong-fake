@@ -1,4 +1,4 @@
-"""Short-lived email verification codes stored in Redis."""
+"""Short-lived password-reset codes stored in Redis."""
 
 import secrets
 
@@ -43,14 +43,6 @@ return 0
 """
 
 
-def _otp_key(user_id: int) -> str:
-    return f"email-otp:{user_id}"
-
-
-def _attempts_key(user_id: int) -> str:
-    return f"email-otp-attempts:{user_id}"
-
-
 def _password_reset_otp_key(email: str) -> str:
     return f"forgot_pwd:{email.strip().lower()}"
 
@@ -80,25 +72,6 @@ def _check_otp(code_key: str, attempts_key: str, otp: str, *, consume: bool) -> 
         "consume" if consume else "keep",
     )
     return int(result)
-
-
-def issue_email_otp(user_id: int) -> str:
-    """Create a cryptographically random 6-digit OTP with a 5-minute TTL."""
-    return _issue_otp(_otp_key(user_id), _attempts_key(user_id))
-
-
-def verify_email_otp(user_id: int, otp: str) -> int:
-    """Atomically compare a code and count wrong attempts.
-
-    Returns 1 for a match, 0 for a wrong code, -1 for an expired code, and
-    -2 after the maximum number of incorrect attempts.
-    """
-    return _check_otp(_otp_key(user_id), _attempts_key(user_id), otp, consume=False)
-
-
-def clear_email_otp(user_id: int) -> None:
-    """Remove the code and its attempt counter after registration completes."""
-    redis_client.delete(_otp_key(user_id), _attempts_key(user_id))
 
 
 def issue_password_reset_otp(email: str) -> str:

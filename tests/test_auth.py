@@ -14,9 +14,9 @@ from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import otp_store, security
+from app import email_verification, otp_store, security
 from app.database import Base, get_session, upgrade_sqlite_schema
-from app.models import User, UserSession
+from app.models import EmailVerificationOTP, User, UserSession
 from app.routers import auth as auth_routes
 
 
@@ -68,7 +68,7 @@ def api_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient, li
 def test_register_stores_inactive_account_and_verifies_email(
     api_client: tuple[TestClient, list[tuple[str, str]], fakeredis.FakeRedis, sessionmaker[Session]],
 ) -> None:
-    client, sent_emails, fake_redis, test_session_factory = api_client
+    client, sent_emails, _, test_session_factory = api_client
     password = "test-password-123"
 
     response = client.post(
@@ -91,9 +91,15 @@ def test_register_stores_inactive_account_and_verifies_email(
     assert sent_email == "player@example.com"
     assert len(otp) == 6 and otp.isdigit()
 
-    otp_key = otp_store._otp_key(account["id"])
-    assert fake_redis.get(otp_key) == otp
-    assert 1 <= fake_redis.ttl(otp_key) <= otp_store.OTP_TTL_SECONDS
+    with test_session_factory() as session:
+        otp_record = session.scalar(
+            select(EmailVerificationOTP).where(
+                EmailVerificationOTP.user_id == account["id"]
+            )
+        )
+        assert otp_record is not None
+        assert otp_record.code_hash != otp
+        assert otp_record.attempts == 0
 
     wrong_otp = "999999" if otp != "999999" else "888888"
     wrong_response = client.post(
@@ -101,6 +107,17 @@ def test_register_stores_inactive_account_and_verifies_email(
         json={"email": "player@example.com", "otp": wrong_otp},
     )
     assert wrong_response.status_code == 400
+    with test_session_factory() as session:
+        pending_user = session.scalar(
+            select(User).where(User.email == "player@example.com")
+        )
+        otp_record = session.scalar(
+            select(EmailVerificationOTP).where(
+                EmailVerificationOTP.user_id == account["id"]
+            )
+        )
+        assert pending_user is not None and pending_user.is_active is False
+        assert otp_record is not None and otp_record.attempts == 1
 
     verified_response = client.post(
         "/api/v1/auth/verify-email",
@@ -108,7 +125,6 @@ def test_register_stores_inactive_account_and_verifies_email(
     )
     assert verified_response.status_code == 200
     assert verified_response.json()["is_active"] is True
-    assert fake_redis.exists(otp_key) == 0
 
     with test_session_factory() as session:
         user = session.scalar(select(User).where(User.email == "player@example.com"))
@@ -116,6 +132,53 @@ def test_register_stores_inactive_account_and_verifies_email(
         assert user.is_active is True
         assert user.password_hash != password
         assert PasswordHash.recommended().verify(password, user.password_hash)
+        assert session.scalar(
+            select(EmailVerificationOTP).where(
+                EmailVerificationOTP.user_id == account["id"]
+            )
+        ) is None
+
+
+def test_expired_database_otp_does_not_activate_account(
+    api_client: tuple[TestClient, list[tuple[str, str]], fakeredis.FakeRedis, sessionmaker[Session]],
+) -> None:
+    client, sent_emails, _, test_session_factory = api_client
+    registration = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "expired-player@example.com",
+            "password": "test-password-123",
+            "display_name": "Expired Player",
+        },
+    )
+    assert registration.status_code == 201
+    user_id = registration.json()["id"]
+    _, otp = sent_emails[0]
+
+    with test_session_factory() as session:
+        otp_record = session.scalar(
+            select(EmailVerificationOTP).where(
+                EmailVerificationOTP.user_id == user_id
+            )
+        )
+        assert otp_record is not None
+        otp_record.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        session.commit()
+
+    verification = client.post(
+        "/api/v1/auth/verify-email",
+        json={"email": "expired-player@example.com", "otp": otp},
+    )
+    assert verification.status_code == 400
+
+    with test_session_factory() as session:
+        user = session.get(User, user_id)
+        assert user is not None and user.is_active is False
+        assert session.scalar(
+            select(EmailVerificationOTP).where(
+                EmailVerificationOTP.user_id == user_id
+            )
+        ) is None
 
 
 def test_login_supports_email_username_and_rotates_remembered_session(
@@ -281,7 +344,7 @@ def test_startup_migration_adds_username_without_deleting_existing_users() -> No
 def test_five_wrong_codes_expire_the_otp(
     api_client: tuple[TestClient, list[tuple[str, str]], fakeredis.FakeRedis, sessionmaker[Session]],
 ) -> None:
-    client, sent_emails, fake_redis, _ = api_client
+    client, sent_emails, _, test_session_factory = api_client
     response = client.post(
         "/api/v1/auth/register",
         json={
@@ -292,20 +355,31 @@ def test_five_wrong_codes_expire_the_otp(
     )
     assert response.status_code == 201
     account_id = response.json()["id"]
-    otp_key = otp_store._otp_key(account_id)
     correct_otp = sent_emails[0][1]
     wrong_otp = "999999" if correct_otp != "999999" else "888888"
 
+    with test_session_factory() as session:
+        assert session.scalar(
+            select(EmailVerificationOTP).where(
+                EmailVerificationOTP.user_id == account_id
+            )
+        ) is not None
+
     statuses = []
-    for _ in range(otp_store.MAX_OTP_ATTEMPTS):
+    for _ in range(email_verification.MAX_EMAIL_OTP_ATTEMPTS):
         wrong_response = client.post(
             "/api/v1/auth/verify-email",
             json={"email": "another-player@example.com", "otp": wrong_otp},
         )
         statuses.append(wrong_response.status_code)
 
-    assert statuses == [400] * (otp_store.MAX_OTP_ATTEMPTS - 1) + [429]
-    assert fake_redis.exists(otp_key) == 0
+    assert statuses == [400] * (email_verification.MAX_EMAIL_OTP_ATTEMPTS - 1) + [429]
+    with test_session_factory() as session:
+        assert session.scalar(
+            select(EmailVerificationOTP).where(
+                EmailVerificationOTP.user_id == account_id
+            )
+        ) is None
 
     correct_response = client.post(
         "/api/v1/auth/verify-email",
