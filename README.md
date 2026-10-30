@@ -1,11 +1,57 @@
-# Co Tuong backend
+# Kỳ Tiên Hội — Frontend và Backend
 
-FastAPI backend written in Python. Registration requires email OTP verification
-before an account becomes active. Password recovery uses a separate email OTP.
+Repository này gồm giao diện React/Vite trong `src/` và API FastAPI trong `app/`.
+Frontend hiện vẫn là prototype: các luồng đăng nhập, phòng, chat, ghép trận và
+nước đi được mô phỏng trong trình duyệt. Chạy backend không tự động kết nối UI;
+`src/config/connection.ts` giữ kết nối ở chế độ demo.
 
-## Run locally on Windows
+## Chạy frontend trên Windows
 
-1. Copy `.env.example` to `.env` and set SMTP credentials.
+Yêu cầu Node.js 22 và pnpm 10.34.3 (được ghim trong `.mise.toml`). Nếu chưa có
+pnpm, cài một lần bằng PowerShell:
+
+```powershell
+npm install --global pnpm@10.34.3
+```
+
+Ảnh/font trong repository được theo dõi bằng Git LFS. Sau khi cài Git LFS, chạy
+`git lfs install`; khi clone mà ảnh chưa tải, chạy `git lfs pull`.
+
+Từ thư mục gốc repository:
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+Mở `http://127.0.0.1:8443`. Vite dùng cổng 8443 mặc định và đọc biến môi trường
+`PORT` nếu cần đổi cổng. Các lệnh frontend khác:
+
+```powershell
+pnpm build
+pnpm preview
+pnpm format
+```
+
+`pnpm preview` chạy bản build; dừng máy chủ dev trước nếu cùng dùng cổng 8443.
+Các màn hình và luồng bấm thử được mô tả trong [PROTOTYPE.md](./PROTOTYPE.md).
+
+## Chạy Backend trên Windows
+
+FastAPI backend dùng SQLite mặc định. Redis cần cho luồng phòng/WebSocket; SMTP
+cần nếu thử đăng ký OTP hoặc gửi email mời. Hướng dẫn API, ví dụ request và
+cách cấu hình chi tiết nằm ở các mục backend bên dưới.
+
+## Backend: run locally on Windows
+
+1. Create the local environment file and set the required values. For example:
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+   Set `JWT_SECRET` to a random value of at least 32 characters. Configure SMTP
+   credentials before trying registration, password reset, or email invitations.
 2. Start Redis:
 
    ```powershell
