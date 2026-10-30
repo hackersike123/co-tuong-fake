@@ -1,0 +1,10 @@
+{
+  "description": "Chơi cờ tướng trực tuyến với máy hoặc kỳ thủ khác, tạo phòng, theo dõi Bảng Phong Thần và xem lại ván đấu trong giao diện tiếng Việt dễ dùng.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

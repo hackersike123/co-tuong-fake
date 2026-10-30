@@ -1,0 +1,33 @@
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;450;500;600&display=swap');
+@import 'tailwindcss';
+@import '@figma/astraui/styles.css';
+@import '../styles/global.css';
+
+/* Locally hosted CJK subset; only piece faces use this CSS-defined font. */
+@font-face {
+  font-family: 'Noto Serif TC';
+  src: url('/fonts/noto-serif-tc-xiangqi.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+@theme inline {
+  --color-brand-primary: var(--brand-primary);
+  --color-brand-tertiary: var(--brand-tertiary);
+  --color-surface-bg: var(--surface-bg);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --spacing-xs: var(--space-xs);
+  --spacing-sm: var(--space-sm);
+  --spacing-md: var(--space-md);
+  --spacing-lg: var(--space-lg);
+  --spacing-xl: var(--space-xl);
+  --spacing-2xl: var(--space-2xl);
+  --radius-corner-md: var(--corner-md);
+  --radius-corner-lg: var(--corner-lg);
+  --font-sans: 'Instrument Sans', system-ui, sans-serif;
+  --font-display: 'Instrument Sans', system-ui, sans-serif;
+}
