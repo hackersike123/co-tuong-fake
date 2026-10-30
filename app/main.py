@@ -21,6 +21,7 @@ from . import room_store
 from .routers.auth import router as auth_router
 from .routers.pve import router as pve_router
 from .routers.rooms import router as rooms_router
+from .routers.ws_api import router as websocket_api_router
 from .settings import CORS_ALLOWED_ORIGINS, LOG_LEVEL
 
 
@@ -108,6 +109,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["accounts"])
 app.include_router(rooms_router, prefix="/api/v1/rooms", tags=["rooms"])
 app.include_router(pve_router, prefix="/api/v1/pve", tags=["single-player"])
+app.include_router(websocket_api_router, prefix="/api/v1", tags=["websocket-rpc"])
 
 
 @app.get("/demo/rooms", include_in_schema=False)

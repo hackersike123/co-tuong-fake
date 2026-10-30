@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import {
   Button,
   IconButton,
@@ -29,16 +29,16 @@ import {
   X,
 } from "lucide-react"
 import { Heading, OnlineStatus, UserAvatar } from "./components"
-import { AppContext, type GameConfig, type ModalName } from "./context"
+import { AppContext, type GameConfig, type ModalName, type RoomAccess } from "./context"
 import {
   gameHistory,
   playerInitials,
-  rooms,
   type GameRecord,
   type Page,
   type Room,
   type Side,
 } from "./data"
+import { WebSocketRpcClient } from "./services/socket"
 import Home from "./pages/Home"
 import Rooms from "./pages/Rooms"
 import Auth from "./pages/Auth"
@@ -87,6 +87,33 @@ function pageFromHash(): Page {
   )
 }
 
+function loadStoredRoomAccess(): RoomAccess | null {
+  try {
+    const raw = sessionStorage.getItem("co-tuong-room-access")
+    if (!raw) return null
+    const access = JSON.parse(raw) as RoomAccess
+    return access.participant_token && access.id > 0 ? access : null
+  } catch {
+    return null
+  }
+}
+
+function roomViewFromAccess(access: RoomAccess): Room {
+  return {
+    id: String(access.id),
+    name: access.room_name,
+    host: access.host_name,
+    initials: playerInitials(access.host_name),
+    elo: 1200,
+    seconds: access.timer_seconds,
+    players: access.player_count,
+    private: !access.is_public,
+    playing: access.status === "playing",
+    spectators: access.allow_spectators,
+    tone: "sage",
+  }
+}
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -100,17 +127,33 @@ function Application() {
   const { reducedMotion, settings, profile, setDemoName: setUsername } = useExperience()
   const username = profile.name
   const profileTone = profile.tone
+  const socketRpc = useMemo(() => new WebSocketRpcClient(), [])
+  const [authToken, setAuthTokenState] = useState(
+    () => sessionStorage.getItem("co-tuong-access-token") || "",
+  )
   const [page, setPage] = useState<Page>(pageFromHash)
   const [modal, setModal] = useState<ModalName>(null)
-  const [signedIn, setSignedIn] = useState(true)
-  const [roomList, setRoomList] = useState(rooms)
-  const [activeRoom, setActiveRoom] = useState(rooms[0])
-  const [isHost, setIsHost] = useState(false)
+  const [signedIn, setSignedInState] = useState(Boolean(authToken))
+  const [roomList, setRoomList] = useState<Room[]>([])
+  const [roomAccess, setRoomAccessState] = useState<RoomAccess | null>(loadStoredRoomAccess)
+  const [activeRoom, setActiveRoom] = useState<Room>(() => roomAccess ? roomViewFromAccess(roomAccess) : {
+    id: "0",
+    name: "Chưa chọn phòng",
+    host: "Kỳ hữu",
+    initials: "KH",
+    elo: 1200,
+    seconds: 30,
+    players: 0,
+    spectators: true,
+    tone: "sage",
+  })
+  const [isHost, setIsHost] = useState(roomAccess?.role === "player1")
   const [gameConfig, setGameConfig] = useState<GameConfig>({
-    mode: "ai",
-    side: "red",
+    mode: pageFromHash() === "game" && roomAccess ? "online" : "ai",
+    side: roomAccess?.role === "player2" ? "black" : "red",
     difficulty: "medium",
     key: 0,
+    spectator: roomAccess?.role === "spectator",
   })
   const [authFlow, setAuthFlow] = useState<"register" | "reset" | "activate">(
     "register",
@@ -128,6 +171,36 @@ function Application() {
   useEffect(() => {
     setTheme("light")
   }, [])
+  useEffect(() => () => socketRpc.close(), [socketRpc])
+  useEffect(() => {
+    let cancelled = false
+    void socketRpc.request<Array<{
+      id: number
+      room_name: string
+      host_name: string
+      timer_seconds: number
+      player_count: number
+      is_public: boolean
+      allow_spectators: boolean
+      status: string
+    }>>("room.list").then((rooms) => {
+      if (cancelled) return
+      setRoomList(rooms.map((room) => ({
+        id: String(room.id),
+        name: room.room_name,
+        host: room.host_name,
+        initials: playerInitials(room.host_name),
+        elo: 1200,
+        seconds: room.timer_seconds as 15 | 30 | 60,
+        players: room.player_count,
+        private: !room.is_public,
+        playing: room.status === "playing",
+        spectators: room.allow_spectators,
+        tone: "sage",
+      })))
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [socketRpc])
   useEffect(() => {
     const onHash = () => {
       setPage(pageFromHash())
@@ -137,6 +210,21 @@ function Application() {
     }
     window.addEventListener("hashchange", onHash)
     return () => window.removeEventListener("hashchange", onHash)
+  }, [])
+  useEffect(() => {
+    const match = /^\/room\/([0-9]+)\/?$/.exec(window.location.pathname)
+    if (!match) return
+    let cancelled = false
+    const inviteToken = new URLSearchParams(window.location.search).get("token")
+    void socketRpc.request<RoomAccess>("room.join", {
+      room_id: Number(match[1]),
+      invite_token: inviteToken || undefined,
+    }).then((access) => {
+      if (!cancelled) acceptRoomAccess(access)
+    }).catch((error) => {
+      if (!cancelled) notify(error instanceof Error ? error.message : "Không thể vào phòng từ liên kết mời.", "error")
+    })
+    return () => { cancelled = true }
   }, [])
   useEffect(() => {
     if (!notification) return
@@ -165,6 +253,56 @@ function Application() {
   ) {
     setNotification({ message, type, key: Date.now() })
   }
+  function setAuthToken(token: string) {
+    setAuthTokenState(token)
+    setSignedInState(Boolean(token))
+    if (token) sessionStorage.setItem("co-tuong-access-token", token)
+    else sessionStorage.removeItem("co-tuong-access-token")
+  }
+  function setSignedIn(value: boolean) {
+    setSignedInState(value)
+    if (!value) setAuthToken("")
+  }
+  function setRoomAccess(access: RoomAccess | null) {
+    setRoomAccessState(access)
+    if (access) sessionStorage.setItem("co-tuong-room-access", JSON.stringify(access))
+    else sessionStorage.removeItem("co-tuong-room-access")
+  }
+  function roomFromAccess(access: RoomAccess): Room {
+    return roomViewFromAccess(access)
+  }
+  function acceptRoomAccess(access: RoomAccess) {
+    setRoomAccess(access)
+    const actualRoom = roomFromAccess(access)
+    setActiveRoom(actualRoom)
+    setIsHost(access.role === "player1")
+    if (access.status === "playing") {
+      setGameConfig((config) => ({
+        ...config,
+        mode: "online",
+        side: access.role === "player2" ? "black" : "red",
+        spectator: access.role === "spectator",
+        key: config.key + 1,
+      }))
+      go("game")
+    } else go("waiting")
+  }
+  async function enterRoom(room: Room, options: { password?: string; invite_token?: string } = {}) {
+    const roomId = Number(room.id)
+    if (!Number.isSafeInteger(roomId) || roomId <= 0) {
+      notify("Mã phòng không hợp lệ.", "error")
+      return
+    }
+    try {
+      const access = await socketRpc.request<RoomAccess>("room.join", {
+        room_id: roomId,
+        ...options,
+      })
+      acceptRoomAccess(access)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Không thể vào phòng.", "error")
+    }
+  }
   function joinRoom(room: Room) {
     if (room.playing && !room.spectators) {
       notify("Phòng đã đủ người và không cho phép khán giả.", "error")
@@ -173,7 +311,29 @@ function Application() {
     setActiveRoom(room)
     setIsHost(Boolean(room.ownedByMe))
     if (room.private) setModal("password")
-    else go("waiting")
+    else void enterRoom(room)
+  }
+  async function joinRoomWithPassword(password: string) {
+    const roomId = Number(activeRoom.id)
+    if (!Number.isSafeInteger(roomId) || roomId <= 0) {
+      throw new Error("Mã phòng không hợp lệ.")
+    }
+    const access = await socketRpc.request<RoomAccess>("room.join", {
+      room_id: roomId,
+      password,
+    })
+    acceptRoomAccess(access)
+  }
+  async function joinRoomByCode(code: string) {
+    const roomCode = code.trim().replace(/^KD/i, "")
+    try {
+      const access = await socketRpc.request<RoomAccess>("room.join_code", {
+        room_code: roomCode,
+      })
+      acceptRoomAccess(access)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Không thể vào phòng.", "error")
+    }
   }
   function startGame(
     mode: "ai" | "online",
@@ -209,8 +369,12 @@ function Application() {
     },
     closeModal: () => setModal(null),
     notify,
+    request: <T,>(event: string, data: Record<string, unknown> = {}, timeoutMs?: number) =>
+      socketRpc.request<T>(event, data, timeoutMs),
     signedIn,
     setSignedIn,
+    authToken,
+    setAuthToken,
     username,
     setUsername,
     profileTone,
@@ -218,9 +382,13 @@ function Application() {
     setRoomList,
     activeRoom: roomForProfile(activeRoom),
     setActiveRoom,
+    roomAccess,
+    setRoomAccess,
     isHost,
     setIsHost,
     joinRoom,
+    joinRoomWithPassword,
+    joinRoomByCode,
     gameConfig,
     startGame,
     authFlow,

@@ -223,6 +223,43 @@ def test_make_move_is_server_validated_and_broadcast_to_room(
             assert red_event["game"]["fen"] != STARTING_FEN
 
 
+def test_room_chat_is_validated_and_broadcast_over_websocket(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post("/api/v1/rooms/", json={"room_name": "Chat room"}).json()
+    opponent = client.post(
+        f"/api/v1/rooms/{host['room_id']}/join",
+        json={},
+    ).json()
+    host_path = (
+        f"/api/v1/rooms/{host['room_id']}/ws"
+        f"?participant_token={host['participant_token']}"
+    )
+    opponent_path = (
+        f"/api/v1/rooms/{host['room_id']}/ws"
+        f"?participant_token={opponent['participant_token']}"
+    )
+
+    with client.websocket_connect(host_path) as host_socket:
+        with client.websocket_connect(opponent_path) as opponent_socket:
+            assert host_socket.receive_json()["type"] == "room.snapshot"
+            assert opponent_socket.receive_json()["type"] == "room.snapshot"
+
+            host_socket.send_json(
+                {"type": "chat_message", "sender_name": "Kỳ hữu Đỏ", "text": "Chào bạn!"}
+            )
+            host_message = _receive_socket_event(host_socket, "chat_message")
+            opponent_message = _receive_socket_event(opponent_socket, "chat_message")
+            assert host_message == opponent_message
+            assert host_message["text"] == "Chào bạn!"
+            assert host_message["sender_name"] == "Kỳ hữu Đỏ"
+
+            host_socket.send_json({"type": "chat_message", "text": "  "})
+            error = _receive_socket_event(host_socket, "error")
+            assert error["reason"] == "invalid_chat_payload"
+
+
 def test_resignation_saves_match_and_move_notation_once(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:

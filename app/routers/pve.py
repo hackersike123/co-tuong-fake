@@ -19,14 +19,18 @@ from ..pve_schemas import (
     PveGameStartResponse,
     PveMoveResponse,
     PveOptionsResponse,
+    PvePlayerMoveRequest,
+    PvePlayerMoveResponse,
     PveSocketMoveRequest,
 )
 from ..xiangqi import (
     GameStatus,
+    Move,
     Side,
     XiangqiState,
     apply_move,
     game_status,
+    game_winner,
     legal_moves,
 )
 
@@ -113,6 +117,27 @@ def start_pve_game(payload: PveGameStartRequest) -> PveGameStartResponse:
     )
 
 
+def validate_pve_player_move(payload: PvePlayerMoveRequest) -> PvePlayerMoveResponse:
+    """Apply one player's move only when it is legal for the submitted FEN."""
+    try:
+        state = XiangqiState.from_fen(payload.fen)
+        move = Move(payload.from_square, payload.to_square)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid game state or move") from exc
+    if state.turn is not payload.player_side:
+        raise HTTPException(status_code=409, detail="It is not the player's turn")
+    if move not in legal_moves(state):
+        raise HTTPException(status_code=422, detail="Illegal move")
+    updated = apply_move(state, move)
+    return PvePlayerMoveResponse(
+        fen=updated.to_fen(),
+        player_side=payload.player_side,
+        side_to_move=updated.turn,
+        status=game_status(updated).value,
+        winner=game_winner(updated),
+    )
+
+
 @router.post(
     "/ai-move",
     response_model=PveAiMoveResponse,
@@ -151,6 +176,8 @@ def request_ai_move(payload: PveAiMoveRequest) -> PveAiMoveResponse:
         score=result.score,
         nodes=result.nodes,
         cutoffs=result.cutoffs,
+        status=game_status(next_state).value,
+        winner=game_winner(next_state),
     )
 
 

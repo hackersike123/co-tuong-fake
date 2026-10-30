@@ -74,7 +74,7 @@ export function CheckmateEffect({
     <div
       className="checkmate-effect"
       role="status"
-      aria-label="Hiệu ứng chiếu bí mô phỏng"
+      aria-label="Hiệu ứng chiếu bí"
     >
       <div className="checkmate-energy" aria-hidden="true" />
       <div className="checkmate-ring" aria-hidden="true" />
@@ -83,7 +83,7 @@ export function CheckmateEffect({
         <div className="checkmate-title">CHIẾU BÍ</div>
         <div>{message}</div>
         {detail && <div className="small">{detail}</div>}
-        <span className="small">Kết quả mô phỏng · không kết nối máy chủ</span>
+        <span className="small">Kết quả ván đấu</span>
         <Button variant="neutral" size="small" onClick={onSkip}>
           Bỏ qua hiệu ứng
         </Button>
