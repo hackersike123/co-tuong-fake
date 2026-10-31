@@ -67,6 +67,8 @@ def players_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient
                     notation="1. b9-a7",
                     final_fen="test-fen",
                     is_public=True,
+                    has_password=False,
+                    allow_spectators=True,
                     red_elo_change=16,
                     black_elo_change=-16,
                 ),
@@ -89,6 +91,48 @@ def players_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClient
                     red_elo_change=0,
                     black_elo_change=0,
                     finished_at=datetime.now(timezone.utc),
+                ),
+                Match(
+                    match_key="password-protected-public-1",
+                    room_id=3,
+                    room_uuid="password-protected-public-room-uuid",
+                    round_number=1,
+                    room_name="Password-protected public game",
+                    red_player=red.display_name,
+                    black_player=black.display_name,
+                    red_user_id=red.id,
+                    black_user_id=black.id,
+                    result="agreement",
+                    reason="draw_agreement",
+                    winner=None,
+                    notation="1. c3-c4",
+                    final_fen="restricted-password-fen",
+                    is_public=True,
+                    has_password=True,
+                    allow_spectators=True,
+                    red_elo_change=0,
+                    black_elo_change=0,
+                ),
+                Match(
+                    match_key="spectators-disabled-public-1",
+                    room_id=4,
+                    room_uuid="spectators-disabled-public-room-uuid",
+                    round_number=1,
+                    room_name="Spectators-disabled public game",
+                    red_player=red.display_name,
+                    black_player=black.display_name,
+                    red_user_id=red.id,
+                    black_user_id=black.id,
+                    result="agreement",
+                    reason="draw_agreement",
+                    winner=None,
+                    notation="1. c3-c4",
+                    final_fen="restricted-spectators-fen",
+                    is_public=True,
+                    has_password=False,
+                    allow_spectators=False,
+                    red_elo_change=0,
+                    black_elo_change=0,
                 ),
             ]
         )
@@ -119,11 +163,11 @@ def test_authenticated_profile_and_stats_use_saved_matches(players_client) -> No
         "display_name": "Red Player",
         "username": "red",
         "elo": 1016,
-        "games_played": 2,
+        "games_played": 4,
         "wins": 1,
-        "draws": 1,
+        "draws": 3,
         "losses": 0,
-        "win_rate": 50.0,
+        "win_rate": 25.0,
         "rank": 1,
     }
 
@@ -144,7 +188,7 @@ def test_leaderboard_and_recent_matches_exclude_private_games(players_client) ->
     leaderboard = client.get("/api/v1/community/leaderboard")
     assert leaderboard.status_code == 200
     assert [row["username"] for row in leaderboard.json()] == ["red", "black"]
-    assert leaderboard.json()[0]["games_played"] == 2
+    assert leaderboard.json()[0]["games_played"] == 4
 
     recent = client.get("/api/v1/community/recent-matches")
     assert recent.status_code == 200

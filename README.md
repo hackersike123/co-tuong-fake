@@ -139,16 +139,24 @@ WebSocket của người chơi có token phòng, không gửi cho khán giả.
 - Toàn bộ stack Docker Compose dùng PostgreSQL và Redis riêng trong Docker network;
   nó lấy `SMTP_*`, JWT và các cài đặt khác từ file môi trường nhưng **ghi đè**
   `DATABASE_URL`/`REDIS_URL` bên trong backend container.
-- Nếu `.env` chưa có ba giá trị bí mật bắt buộc cho Compose, đặt chúng trong file riêng
-  `.env.compose.local` (đã bị Git ignore) rồi nạp cả hai file theo đúng thứ tự:
+- Nếu `.env` thiếu một trong ba bí mật Compose, đặt `POSTGRES_PASSWORD`,
+  `REDIS_PASSWORD` và `JWT_SECRET` riêng trong `.env.compose.local` (đã bị Git ignore).
+  Nếu `.env` đã có đủ, không cần tạo hoặc nạp overlay. Không truyền một `--env-file`
+  không tồn tại vì Compose sẽ dừng với lỗi.
 
   ```powershell
+  # Khi secrets đã có trong .env:
+  docker compose --env-file .env config --quiet
+  docker compose --env-file .env up -d --build
+  docker compose --env-file .env ps
+
+  # Khi secrets nằm trong .env.compose.local, thêm overlay sau .env:
   docker compose --env-file .env --env-file .env.compose.local config --quiet
   docker compose --env-file .env --env-file .env.compose.local up -d --build
   docker compose --env-file .env --env-file .env.compose.local ps
   ```
 
-  Giữ nguyên cùng thứ tự `--env-file` cho `exec`, `logs` và `down`. Không dùng
+  Giữ nguyên cùng thứ tự `--env-file` đã chọn cho `exec`, `logs` và `down`. Không dùng
   `down -v` trừ khi chủ động xóa toàn bộ dữ liệu PostgreSQL/Redis.
 
 ### 5. Ngrok hoặc HTTPS công khai
@@ -177,9 +185,12 @@ python -m pip install -r requirements.txt
 các env file đã chuẩn bị, rồi chạy runner:
 
 ```powershell
-docker compose --env-file .env --env-file .env.compose.local up -d redis
+docker compose --env-file .env up -d redis
 .\scripts\run-backend.ps1
 ```
+
+Nếu Redis/PostgreSQL secrets chỉ có trong `.env.compose.local`, thêm
+`--env-file .env.compose.local` sau `.env`.
 
 Backend mở tại `http://127.0.0.1:8000`. Để chạy frontend hot reload đồng thời
 với backend/database/cache trong Compose, xem mục “Host-run frontend development”.
@@ -195,7 +206,8 @@ Sau khi kích hoạt môi trường ảo và cài các gói trong `requirements.
 bash scripts/run-backend.sh
 ```
 
-Lệnh này chạy `app.main:app` trên `0.0.0.0:8000` với một worker và uvloop.
+Lệnh này chạy `app.main:app` mặc định trên `127.0.0.1:8000` với một worker và uvloop.
+Có thể đặt `BACKEND_BIND_ADDRESS` để thay đổi bind address khi thật sự cần.
 Script không bật autoreload.
 
 ## Origin CORS và WebSocket
@@ -215,21 +227,24 @@ Compose; các port backend và Nginx chỉ bind vào loopback. Backend dùng Pyt
 1. Giữ nguyên `.env` hiện có; Compose đọc cấu hình SMTP và ứng dụng từ file đó.
    Trong container, `DATABASE_URL` và `REDIS_URL` được ghi đè để dùng PostgreSQL
    và Redis nội bộ thay vì SQLite/Redis trên host.
-2. Nếu `.env` thiếu ba bí mật cần cho Compose, thêm `POSTGRES_PASSWORD`,
-   `REDIS_PASSWORD` và `JWT_SECRET` vào file bị Git bỏ qua `.env.compose.local`.
-   Dùng ba giá trị ngẫu nhiên khác nhau; không chép SMTP password vào overlay.
-3. Kiểm tra cấu hình rồi khởi động:
+2. Nếu `.env` thiếu ba bí mật Compose, thêm `POSTGRES_PASSWORD`, `REDIS_PASSWORD`
+   và `JWT_SECRET` vào `.env.compose.local`. Dùng ba giá trị ngẫu nhiên khác nhau;
+   không chép SMTP password vào overlay. Nếu secrets đã có trong `.env`, không cần overlay.
+3. Kiểm tra cấu hình rồi khởi động bằng `.env`:
 
    ```bash
-   docker compose --env-file .env --env-file .env.compose.local config --quiet
-   docker compose --env-file .env --env-file .env.compose.local up -d --build
-   docker compose --env-file .env --env-file .env.compose.local ps
+   docker compose --env-file .env config --quiet
+   docker compose --env-file .env up -d --build
+   docker compose --env-file .env ps
    ```
+
+   Nếu secrets nằm trong `.env.compose.local`, thêm
+   `--env-file .env.compose.local` ngay sau `--env-file .env` cho mọi lệnh Compose.
 
 4. Mở <http://127.0.0.1:8002>. Kiểm tra `/healthz` của Nginx và `/api/health`
    của PostgreSQL, Redis và cầu nối WebSocket. Xem log bằng
-   `docker compose --env-file .env --env-file .env.compose.local logs -f backend nginx`.
-5. Dừng bằng `docker compose --env-file .env --env-file .env.compose.local down`;
+   `docker compose --env-file .env logs -f backend nginx`.
+5. Dừng bằng `docker compose --env-file .env down`;
    volume dữ liệu được giữ lại. Chỉ dùng `down -v` khi chủ động xóa toàn bộ dữ liệu.
 
 Khi dùng tunnel HTTPS, giữ Nginx/backend bind vào loopback, đặt
@@ -249,9 +264,12 @@ Compose rồi chỉ chạy Vite trên máy phát triển. Vite chuyển tiếp `
 WebSocket tới backend port 8000:
 
 ```powershell
-docker compose --env-file .env --env-file .env.compose.local up -d database redis backend
+docker compose --env-file .env up -d database redis backend
 pnpm dev
 ```
+
+Nếu secrets nằm trong `.env.compose.local`, thêm
+`--env-file .env.compose.local` sau `.env`.
 
 Mở <http://127.0.0.1:8443>. `VITE_API_PROXY_TARGET` mặc định là
 `http://127.0.0.1:8000`. Giao diện chạy hoàn toàn trong container ở
@@ -283,12 +301,15 @@ Khởi động máy chủ HTTP tạm để xác thực HTTP-01, xin chứng ch�
 cấu hình HTTPS/WSS:
 
 ```bash
-docker compose -f compose.yaml -f compose.acme.yaml up -d nginx
-docker compose -f compose.yaml -f compose.acme.yaml -f compose.certbot.yaml \
+compose_env=(--env-file .env)
+# If Docker secrets are stored in .env.compose.local, uncomment the next line.
+# compose_env+=(--env-file .env.compose.local)
+docker compose "${compose_env[@]}" -f compose.yaml -f compose.acme.yaml up -d nginx
+docker compose "${compose_env[@]}" -f compose.yaml -f compose.acme.yaml -f compose.certbot.yaml \
   --profile certbot run --rm --entrypoint sh certbot -c \
   'certbot certonly --webroot -w /var/www/certbot -d "$CERTBOT_DOMAIN" --email "$CERTBOT_EMAIL" --agree-tos --no-eff-email'
-docker compose -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml up -d nginx
-docker compose -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml exec nginx nginx -t
+docker compose "${compose_env[@]}" -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml up -d nginx
+docker compose "${compose_env[@]}" -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml exec nginx nginx -t
 ```
 
 Cấu hình production chuyển hướng HTTP sang HTTPS, vẫn phục vụ đường dẫn xác thực

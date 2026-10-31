@@ -65,7 +65,7 @@ export type RoomAccess = {
 };
 export type AppContextValue = {
   page: Page;
-  go: (page: Page) => void;
+  go: (page: Page, bypassRoomConfirmation?: boolean) => void;
   openModal: (modal: ModalName) => void;
   closeModal: () => void;
   notify: (message: string, type?: "success" | "error" | "info") => void;
@@ -99,7 +99,7 @@ export type AppContextValue = {
   setIsHost: (value: boolean) => void;
   joinRoom: (room: Room) => void;
   joinRoomWithPassword: (password: string) => Promise<void>;
-  joinRoomByCode: (code: string) => Promise<void>;
+  joinRoomByCode: (code: string, password?: string) => Promise<void>;
   gameConfig: GameConfig;
   startGame: (mode: "ai" | "online", side?: Side, difficulty?: string, spectator?: boolean) => void;
   authFlow: "register" | "reset" | "activate";

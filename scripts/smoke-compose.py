@@ -7,6 +7,7 @@ import asyncio
 import json
 import secrets
 import subprocess
+from collections.abc import Callable
 import urllib.error
 import urllib.request
 import uuid
@@ -147,7 +148,11 @@ async def receive_type(websocket: Any, *types: str) -> dict[str, Any]:
             return event
 
 
-async def exercise(base_url: str, accounts: list[dict[str, Any]]) -> tuple[int, dict[str, Any]]:
+async def exercise(
+    base_url: str,
+    accounts: list[dict[str, Any]],
+    on_room_created: Callable[[int], None] | None = None,
+) -> tuple[int, dict[str, Any]]:
     origin: Any = base_url
     api_prefix = "/api/v1"
     tokens = []
@@ -193,6 +198,8 @@ async def exercise(base_url: str, accounts: list[dict[str, Any]]) -> tuple[int, 
             {"room_name": "Compose smoke game", "host_name": "untrusted host", "auth_token": tokens[0]},
         )
         room_id = int(room["id"])
+        if on_room_created is not None:
+            on_room_created(room_id)
         if room["host_name"] != accounts[0]["name"]:
             raise AssertionError("The server did not bind the authenticated host identity")
         joined = await rpc(
@@ -265,8 +272,19 @@ def main() -> None:
     env_files = args.env_file or [Path(".env.local.example")]
     accounts = seed_accounts(env_files)
     room_id = None
+
+    def remember_room_id(created_room_id: int) -> None:
+        nonlocal room_id
+        room_id = created_room_id
+
     try:
-        room_id, result = asyncio.run(exercise(args.base_url.rstrip("/"), accounts["accounts"]))
+        room_id, result = asyncio.run(
+            exercise(
+                args.base_url.rstrip("/"),
+                accounts["accounts"],
+                on_room_created=remember_room_id,
+            )
+        )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     finally:
         remove_smoke_data(env_files, accounts["prefix"], room_id)

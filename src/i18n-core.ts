@@ -134,6 +134,8 @@ const VI_TO_EN: Readonly<Record<string, string>> = {
   "Đóng thông báo": "Dismiss notification",
   "Đăng xuất": "Sign Out",
   "Bạn đang trải nghiệm ở chế độ khách.": "You are now browsing as a guest.",
+  "Không xác nhận được việc đăng xuất. Hãy thử lại khi có kết nối.":
+    "Could not confirm sign-out. Please try again when connected.",
   "Bàn cờ luôn mở.": "The board is always open.",
   "Chào mừng trở lại!": "Welcome back!",
   "Menu tài khoản": "Account menu",
@@ -575,6 +577,31 @@ const VI_TO_EN: Readonly<Record<string, string>> = {
   "Thống kê Elo, lịch sử trận và thứ hạng lấy từ tài khoản của bạn.":
     "Elo, match history, and rankings are based on your account.",
   "Gửi lại sau": "Resend in",
+  "Chưa nhận được mã?": "Didn't receive the code?",
+  "Nhập mã phòng và mật khẩu nếu phòng yêu cầu.": "Enter the room code and password if required.",
+  "Mật khẩu phòng nếu có": "Room password if required",
+  "Mật khẩu phòng (nếu cần)": "Room password (if required)",
+  "Rời phòng chờ sẽ đóng phòng cho những người đang tham gia. Bạn có muốn tiếp tục?":
+    "Leaving the waiting room will close it for everyone. Continue?",
+  "Rời phòng chờ sẽ ngắt kết nối và bạn có thể phải vào lại. Bạn có muốn tiếp tục?":
+    "Leaving the waiting room disconnects you; you may need to rejoin. Continue?",
+  "Rời ván online sẽ ngắt kết nối; nếu ván chưa kết thúc và bạn không quay lại trong thời gian cho phép, bạn có thể bị xử thua. Bạn có muốn tiếp tục?":
+    "Leaving the online game disconnects you; you may forfeit an unfinished game if you do not reconnect in time. Continue?",
+  "Email, tên đăng nhập hoặc mật khẩu không đúng.": "Invalid email/username or password",
+  "Xác thực chưa được cấu hình.": "Authentication is not configured",
+  "Email hoặc tên đăng nhập đã được đăng ký.": "Email or username is already registered",
+  "Dịch vụ email chưa được cấu hình.": "Email service is not configured",
+  "Không thể gửi email xác minh.": "Could not send verification email",
+  "Mã xác minh không hợp lệ hoặc đã hết hạn.": "Invalid or expired verification code",
+  "Quá nhiều lần nhập sai mã xác minh.": "Too many incorrect verification attempts",
+  "Mã đặt lại mật khẩu không hợp lệ hoặc đã hết hạn.": "Invalid or expired password reset code",
+  "Dịch vụ đặt lại mật khẩu tạm thời không khả dụng.":
+    "Password reset service is temporarily unavailable",
+  "Quá nhiều lần nhập sai mã đặt lại mật khẩu.": "Too many incorrect password reset attempts",
+  "Phiên đăng nhập không hợp lệ hoặc đã hết hạn.": "Invalid or expired access token",
+  "Cần đăng nhập để tiếp tục.": "Authentication is required",
+  "Chưa lưu được kết quả ván trước; hãy thử lại.":
+    "Could not save the previous game result. Please try again.",
   "Mã xác minh mới đã được gửi qua email.": "A new verification code has been sent by email.",
   "Mã được gửi qua email và hết hạn sau 5 phút.":
     "The code was sent by email and expires in 5 minutes.",
@@ -767,6 +794,12 @@ const DYNAMIC_PATTERNS: Array<{
   enPattern: RegExp;
   toVi: (match: RegExpMatchArray) => string;
 }> = [
+  {
+    vi: /^Mã có hiệu lực trong (\d{2}:\d{2})$/,
+    en: (match) => `Code expires in ${match[1]}`,
+    enPattern: /^Code expires in (\d{2}:\d{2})$/,
+    toVi: (match) => `Mã có hiệu lực trong ${match[1]}`,
+  },
   {
     vi: /^🐴 (.+) · Kỳ Tiên Hội$/,
     en: (match) => `🐴 ${translateText(match[1], "en")} · Ky Tien Hoi`,

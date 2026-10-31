@@ -174,6 +174,8 @@ def recent_public_matches(
         session.scalars(
             select(Match)
             .where(Match.is_public.is_(True))
+            .where(Match.has_password.is_(False))
+            .where(Match.allow_spectators.is_(True))
             .order_by(Match.finished_at.desc(), Match.id.desc())
             .limit(limit)
         ).all()

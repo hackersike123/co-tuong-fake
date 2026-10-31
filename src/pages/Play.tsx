@@ -50,8 +50,13 @@ import {
   UserAvatar,
 } from "../components";
 import { useApp, type RoomAccess } from "../context";
-import { intlLocale } from "../i18n-core";
+import { intlLocale, translateText } from "../i18n-core";
 import { useLanguage } from "../i18n";
+import {
+  canContinueCallAfterMediaPrompt,
+  isCurrentIncomingCall,
+  isOtherPlayerRole,
+} from "../room-interactions";
 import {
   formatClock,
   initialPieces,
@@ -498,7 +503,7 @@ export function WaitingRoom() {
           } else if (event.type === "room.closed") {
             notify("Phòng đã đóng.", "info");
             setRoomAccess(null);
-            go("rooms");
+            go("rooms", true);
           } else if (event.type === "error") {
             notify(
               String((event as { reason?: string }).reason || "Yêu cầu phòng không hợp lệ."),
@@ -596,7 +601,7 @@ export function WaitingRoom() {
         participant_token: roomAccess.participant_token,
       });
       setRoomAccess(null);
-      go("rooms");
+      go("rooms", true);
     } catch (error) {
       notify(error instanceof Error ? error.message : "Không thể rời phòng.", "error");
     }
@@ -1098,6 +1103,15 @@ export function Game() {
         audio: true,
         video: mode === "video",
       });
+      if (
+        !canContinueCallAfterMediaPrompt(
+          ended.current,
+          roomSocket.current?.readyState === WebSocket.OPEN,
+        )
+      ) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       localStreamRef.current = stream;
       setLocalStream(stream);
       callModeRef.current = mode;
@@ -1128,6 +1142,13 @@ export function Game() {
         audio: true,
         video: incoming.mode === "video",
       });
+      if (
+        ended.current ||
+        !isCurrentIncomingCall(callStatusRef.current, incomingCallRef.current, incoming)
+      ) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       localStreamRef.current = stream;
       setLocalStream(stream);
       callModeRef.current = incoming.mode;
@@ -1140,6 +1161,12 @@ export function Game() {
         notify("Mất kết nối trước khi trả lời cuộc gọi.", "error");
       }
     } catch {
+      if (
+        ended.current ||
+        !isCurrentIncomingCall(callStatusRef.current, incomingCallRef.current, incoming)
+      ) {
+        return;
+      }
       sendCallSignal("reject");
       finishCall();
       notify(
@@ -1484,14 +1511,21 @@ export function Game() {
             if (callStatusRef.current !== "idle") finishCall();
             notify("Phòng đã đóng.", "info");
             setRoomAccess(null);
-            go("rooms");
+            go("rooms", true);
           } else if (event.type === "move_rejected" || event.type === "error") {
             setServerPending(false);
-            notify(event.reason || "Máy chủ từ chối nước đi.", "error");
-          } else if (event.type === "draw_offered") {
-            const accept = window.confirm("Đối thủ muốn hòa ván cờ. Bạn có đồng ý không?");
+            notify(
+              event.reason === "match_persistence_unavailable"
+                ? "Chưa lưu được kết quả ván trước; hãy thử lại."
+                : event.reason || "Máy chủ từ chối nước đi.",
+              "error",
+            );
+          } else if (event.type === "draw_offered" && isOtherPlayerRole(access.role, event.role)) {
+            const accept = window.confirm(
+              translateText("Đối thủ muốn hòa ván cờ. Bạn có đồng ý không?", language),
+            );
             socket?.send(JSON.stringify({ type: "respond_draw", accept }));
-          } else if (event.type === "draw_declined") {
+          } else if (event.type === "draw_declined" && isOtherPlayerRole(access.role, event.role)) {
             notify("Đối thủ đã từ chối hòa.", "info");
           }
         } catch {
@@ -1503,7 +1537,7 @@ export function Game() {
         if ([4401, 4403, 4404, 4409].includes(event.code)) {
           setRoomAccess(null);
           notify(event.reason || "Phiên phòng đã hết hiệu lực.", "error");
-          go("rooms");
+          go("rooms", true);
           return;
         }
         setDisconnected(true);
@@ -1596,7 +1630,7 @@ export function Game() {
         participant_token: roomAccess.participant_token,
       });
       setRoomAccess(null);
-      go("rooms");
+      go("rooms", true);
     } catch (error) {
       notify(error instanceof Error ? error.message : "Không thể rời ván đấu.", "error");
     }
@@ -2165,13 +2199,13 @@ export function Game() {
             iconStart={<RotateCw size={17} />}
             onClick={() =>
               config.mode === "online" || spectator
-                ? go("rooms")
+                ? go("rooms", true)
                 : startGame(config.mode, config.side, config.difficulty, false)
             }
           >
             {spectator ? "Về sảnh đấu" : ai ? "Chơi lại" : "Tìm ván mới"}
           </Button>
-          <Button variant="neutral" className="button-full" onClick={() => go("home")}>
+          <Button variant="neutral" className="button-full" onClick={() => go("home", true)}>
             Về sảnh chính
           </Button>
           <span className="small muted">

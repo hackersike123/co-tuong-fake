@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Button,
   IconButton,
@@ -58,6 +58,13 @@ import { GlobalDialogs } from "./dialogs";
 import { ExperienceProvider, useExperience } from "./experience/Experience";
 import { useLanguage } from "./i18n";
 import { intlLocale, translateText } from "./i18n-core";
+import {
+  requiresRoomExitConfirmation,
+  shouldApplyAuthRefresh,
+  trackPendingRequest,
+  waitForPendingRequests,
+} from "./room-interactions";
+import { buildRoomCodeJoinPayload } from "./room-join";
 
 const slugs: Record<Page, string> = {
   home: "sanh-chinh",
@@ -147,7 +154,11 @@ function Application() {
   const [authToken, setAuthTokenState] = useState(
     () => sessionStorage.getItem("co-tuong-access-token") || "",
   );
+  const authEpochRef = useRef(0);
+  const logoutInProgressRef = useRef(false);
+  const pendingRefreshRequestsRef = useRef(new Set<Promise<unknown>>());
   const [page, setPage] = useState<Page>(pageFromHash);
+  const pageRef = useRef(page);
   const [modal, setModal] = useState<ModalName>(null);
   const [signedIn, setSignedInState] = useState(Boolean(authToken));
   const [currentUser, setCurrentUser] = useState<PlayerAccount | null>(null);
@@ -196,7 +207,16 @@ function Application() {
       authToken && !event.startsWith("auth.") ? { ...data, auth_token: authToken } : data;
     return socketRpc.request<T>(event, payload, timeoutMs);
   }
+  const requestRefreshToken = useCallback(
+    () =>
+      trackPendingRequest(
+        pendingRefreshRequestsRef.current,
+        apiFetch<{ access_token: string }>("/api/v1/auth/refresh", { method: "POST" }),
+      ),
+    [],
+  );
   const refreshData = useCallback(async () => {
+    const requestEpoch = authEpochRef.current;
     const [summaryResult, leaderboardResult, recentResult] = await Promise.allSettled([
       apiFetch<CommunitySummary>("/api/v1/community/summary"),
       apiFetch<RankedPlayer[]>("/api/v1/community/leaderboard"),
@@ -207,16 +227,30 @@ function Application() {
     if (recentResult.status === "fulfilled") setRecentMatches(recentResult.value);
 
     if (!authToken) {
+      if (logoutInProgressRef.current) {
+        setCurrentUser(null);
+        setPlayerStats(null);
+        setMyMatches([]);
+        setSignedInState(false);
+        setElo(INITIAL_ELO);
+        return;
+      }
       try {
-        const refreshed = await apiFetch<{ access_token: string }>("/api/v1/auth/refresh", {
-          method: "POST",
-        });
-        if (refreshed.access_token) {
+        const refreshed = await requestRefreshToken();
+        if (
+          refreshed.access_token &&
+          shouldApplyAuthRefresh(requestEpoch, authEpochRef.current, logoutInProgressRef.current)
+        ) {
           setAuthToken(refreshed.access_token);
           return;
         }
       } catch {
         // A guest has no refresh cookie; continue with public data.
+      }
+      if (
+        !shouldApplyAuthRefresh(requestEpoch, authEpochRef.current, logoutInProgressRef.current)
+      ) {
+        return;
       }
       setCurrentUser(null);
       setPlayerStats(null);
@@ -233,6 +267,11 @@ function Application() {
           token: authToken,
         }),
       ]);
+      if (
+        !shouldApplyAuthRefresh(requestEpoch, authEpochRef.current, logoutInProgressRef.current)
+      ) {
+        return;
+      }
       setCurrentUser(user);
       setPlayerStats(stats);
       setMyMatches(matches);
@@ -241,20 +280,30 @@ function Application() {
       setSignedInState(true);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
+        if (
+          !shouldApplyAuthRefresh(requestEpoch, authEpochRef.current, logoutInProgressRef.current)
+        ) {
+          return;
+        }
         try {
-          const refreshed = await apiFetch<{ access_token: string }>("/api/v1/auth/refresh", {
-            method: "POST",
-          });
-          if (refreshed.access_token) {
+          const refreshed = await requestRefreshToken();
+          if (
+            refreshed.access_token &&
+            shouldApplyAuthRefresh(requestEpoch, authEpochRef.current, logoutInProgressRef.current)
+          ) {
             setAuthToken(refreshed.access_token);
             return;
           }
         } catch {
-          setAuthToken("");
+          if (
+            shouldApplyAuthRefresh(requestEpoch, authEpochRef.current, logoutInProgressRef.current)
+          ) {
+            setAuthToken("");
+          }
         }
       }
     }
-  }, [authToken, setElo, setUsername]);
+  }, [authToken, requestRefreshToken, setElo, setUsername]);
   useEffect(() => {
     void refreshData();
   }, [refreshData]);
@@ -308,14 +357,16 @@ function Application() {
   }, [socketRpc]);
   useEffect(() => {
     const onHash = () => {
-      setPage(pageFromHash());
+      const nextPage = pageFromHash();
+      if (nextPage === pageRef.current) return;
+      go(nextPage);
       setModal(null);
       setMobileNav(false);
       document.querySelector(".main-scroll")?.scrollTo({ top: 0 });
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
-  }, []);
+  }, [page, roomAccess, gameConfig.mode, language]);
   useEffect(() => {
     const match = /^\/room\/([0-9]+)\/?$/.exec(window.location.pathname);
     if (!match) return;
@@ -352,7 +403,35 @@ function Application() {
     setProfileMenu(false);
     setBellMenu(false);
   }, [page, language]);
-  function go(next: Page) {
+  function canLeaveActiveRoom(next: Page): boolean {
+    if (
+      !requiresRoomExitConfirmation(
+        page,
+        next,
+        Boolean(roomAccess && roomAccess.role !== "spectator"),
+        gameConfig.mode,
+      )
+    ) {
+      return true;
+    }
+    const warning =
+      page === "waiting"
+        ? roomAccess?.role === "player1"
+          ? "Rời phòng chờ sẽ đóng phòng cho những người đang tham gia. Bạn có muốn tiếp tục?"
+          : "Rời phòng chờ sẽ ngắt kết nối và bạn có thể phải vào lại. Bạn có muốn tiếp tục?"
+        : "Rời ván online sẽ ngắt kết nối; nếu ván chưa kết thúc và bạn không quay lại trong thời gian cho phép, bạn có thể bị xử thua. Bạn có muốn tiếp tục?";
+    return window.confirm(translateText(warning, language));
+  }
+  function go(next: Page, bypassRoomConfirmation = false) {
+    if (!bypassRoomConfirmation && !canLeaveActiveRoom(next)) {
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${window.location.search}#${slugs[pageRef.current]}`,
+      );
+      return;
+    }
+    pageRef.current = next;
     setPage(next);
     setMobileNav(false);
     setModal(null);
@@ -365,6 +444,8 @@ function Application() {
     setNotification({ message, type, key: Date.now() });
   }
   function setAuthToken(token: string) {
+    authEpochRef.current += 1;
+    if (token) logoutInProgressRef.current = false;
     setAuthTokenState(token);
     setSignedInState(Boolean(token));
     if (token) sessionStorage.setItem("co-tuong-access-token", token);
@@ -443,12 +524,10 @@ function Application() {
     });
     acceptRoomAccess(access);
   }
-  async function joinRoomByCode(code: string) {
-    const roomCode = code.trim().toUpperCase();
+  async function joinRoomByCode(code: string, password?: string) {
     try {
       const access = await rpcRequest<RoomAccess>("room.join_code", {
-        room_code: roomCode,
-        participant_name: username,
+        ...buildRoomCodeJoinPayload(code, username, password),
       });
       acceptRoomAccess(access);
     } catch (error) {
@@ -468,7 +547,7 @@ function Application() {
       key: config.key + 1,
       spectator,
     }));
-    go("game");
+    go("game", mode === "online");
   }
   function viewRecord(record: GameRecord) {
     setSelectedRecord(record);
@@ -768,13 +847,24 @@ function Application() {
                         variant="subtle"
                         iconStart={<LogOut size={16} />}
                         onClick={() => {
-                          void apiFetch("/api/v1/auth/logout", {
-                            method: "POST",
-                          }).catch(() => undefined);
+                          if (!canLeaveActiveRoom("home")) return;
+                          logoutInProgressRef.current = true;
+                          authEpochRef.current += 1;
                           setSignedIn(false);
                           setProfileMenu(false);
-                          go("home");
+                          go("home", true);
                           notify("Bạn đang trải nghiệm ở chế độ khách.", "info");
+                          void (async () => {
+                            await waitForPendingRequests(pendingRefreshRequestsRef.current);
+                            try {
+                              await apiFetch("/api/v1/auth/logout", { method: "POST" });
+                            } catch {
+                              notify(
+                                "Không xác nhận được việc đăng xuất. Hãy thử lại khi có kết nối.",
+                                "error",
+                              );
+                            }
+                          })();
                         }}
                       >
                         Đăng xuất

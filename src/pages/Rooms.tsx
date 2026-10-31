@@ -58,6 +58,7 @@ export default function Rooms() {
   const [query, setQuery] = useState("");
   const [time, setTime] = useState("all");
   const [code, setCode] = useState("");
+  const [codePassword, setCodePassword] = useState("");
   const [status, setStatus] = useState("all");
   const [state, setState] = useState("loading");
   const [visible, setVisible] = useState(6);
@@ -121,7 +122,7 @@ export default function Rooms() {
       (status === "all" || (status === "waiting" ? !room.playing : room.playing)),
   );
   function quickJoin() {
-    void joinRoomByCode(code);
+    void joinRoomByCode(code, codePassword || undefined);
   }
   return (
     <div className="page-stack rooms-page">
@@ -153,7 +154,7 @@ export default function Rooms() {
           </span>
           <div>
             <Heading level={3}>Đã có lời mời?</Heading>
-            <div className="small muted">Nhập mã phòng do bạn bè gửi.</div>
+            <div className="small muted">Nhập mã phòng và mật khẩu nếu phòng yêu cầu.</div>
           </div>
         </div>
         <form
@@ -177,6 +178,15 @@ export default function Rooms() {
             }
             maxLength={10}
             required
+          />
+          <InputField
+            label="Mật khẩu phòng nếu có"
+            aria-label="Mật khẩu phòng nếu có"
+            placeholder="Mật khẩu phòng (nếu cần)"
+            type="password"
+            autoComplete="current-password"
+            value={codePassword}
+            onChange={setCodePassword}
           />
           <Button variant="neutral" type="submit" iconEnd={<ArrowRight size={16} />}>
             Vào nhanh

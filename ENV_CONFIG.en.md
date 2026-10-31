@@ -75,7 +75,7 @@ Voice/video calls use WebRTC and request camera/microphone access only after a p
 
 The Compose backend uses PostgreSQL and password-protected Redis on its private network. It continues to read SMTP and other application settings from the main `.env`; the host-run SQLite/Redis URLs in `.env` are overridden inside the backend container.
 
-If the three Docker secrets are missing from an existing `.env`, place them in the ignored `.env.compose.local` file. It should contain:
+If `.env` is missing any of the three Docker secrets, place the missing values in the ignored `.env.compose.local` file. Do not create or pass this overlay when `.env` already contains all three values. When used, it should contain:
 
 ```text
 POSTGRES_PASSWORD=<first generated secret>
@@ -83,13 +83,15 @@ REDIS_PASSWORD=<second, different generated secret>
 JWT_SECRET=<third, different generated secret>
 ```
 
-Replace all angle-bracketed examples with generated values. Keep the SMTP credentials in `.env`. Validate and start with the same env-file order:
+Replace all angle-bracketed examples with generated values. Keep the SMTP credentials in `.env`. When secrets are in `.env`, validate and start with:
 
 ```powershell
-docker compose --env-file .env --env-file .env.compose.local config --quiet
-docker compose --env-file .env --env-file .env.compose.local up -d --build
-docker compose --env-file .env --env-file .env.compose.local ps
+docker compose --env-file .env config --quiet
+docker compose --env-file .env up -d --build
+docker compose --env-file .env ps
 ```
+
+If secrets are in `.env.compose.local`, append `--env-file .env.compose.local` to each command after `--env-file .env`. Never pass an env-file that does not exist. Keep the same selected file order for `up`, `exec`, `logs`, and `down`.
 
 Open `http://127.0.0.1:8002`. Check `http://127.0.0.1:8002/healthz` and `http://127.0.0.1:8002/api/health`. PostgreSQL and Redis are not exposed publicly. Preserve named volumes with `down`; `down -v` deletes their data.
 
@@ -98,9 +100,11 @@ Open `http://127.0.0.1:8002`. Check `http://127.0.0.1:8002/healthz` and `http://
 The host-run default uses SQLite. Configure `REDIS_URL` with the Redis password if using the Compose Redis service, then start Redis and FastAPI:
 
 ```powershell
-docker compose --env-file .env --env-file .env.compose.local up -d redis
+docker compose --env-file .env up -d redis
 .\scripts\run-backend.ps1
 ```
+
+Add `--env-file .env.compose.local` only if the required Redis/Compose secret is stored there.
 
 Run Vite separately with `pnpm dev`; it proxies API and WebSocket traffic to `VITE_API_PROXY_TARGET`.
 
@@ -121,8 +125,10 @@ Use the exact HTTPS origin shown by ngrok, without a trailing path. Tunnel only 
 
 ```powershell
 ngrok http 127.0.0.1:8002
-docker compose --env-file .env --env-file .env.compose.local --env-file .env.ngrok.local up -d --no-deps --force-recreate backend nginx
+docker compose --env-file .env --env-file .env.ngrok.local up -d --no-deps --force-recreate backend nginx
 ```
+
+If Docker secrets are stored in `.env.compose.local`, pass it after `.env` and before `.env.ngrok.local` in the Compose command.
 
 Never tunnel PostgreSQL, Redis, or the backend port directly. A free ngrok address is temporary; update the overlay whenever the address changes.
 

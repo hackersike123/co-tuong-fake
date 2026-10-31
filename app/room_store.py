@@ -31,8 +31,12 @@ local status = redis.call('HGET', KEYS[1], 'status')
 if status == 'waiting' then
     local player2_token = redis.call('HGET', KEYS[1], 'player2_token')
     if not player2_token or player2_token == '' then
-        redis.call('HSET', KEYS[1], 'player2_token', ARGV[1])
-        redis.call('HSET', KEYS[1], 'player2_ready', 'false')
+        redis.call('HSET', KEYS[1],
+            'player2_token', ARGV[1],
+            'player2_ready', 'false',
+            'player2_name', ARGV[2],
+            'player2_user_id', ARGV[3],
+            'player2_elo', ARGV[4])
         redis.call('HSET', KEYS[2], ARGV[1], 'player2')
         return 'player2'
     end
@@ -51,6 +55,13 @@ local value = redis.call('HGET', KEYS[1], ARGV[1])
 if value and value ~= '' then return value end
 redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
 return ARGV[2]
+"""
+
+_APPEND_CHAT_MESSAGE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('RPUSH', KEYS[2], ARGV[1])
+redis.call('LTRIM', KEYS[2], -100, -1)
+return 1
 """
 
 _GET_OR_CREATE_ROOM_CODE_SCRIPT = """
@@ -186,6 +197,12 @@ redis.call('HSET', KEYS[1],
     'game_version', next_version,
     'side_to_move', next_side,
     'turn_started_at_ms', now_ms)
+local draw_offer_by = redis.call('HGET', KEYS[1], 'game_draw_offer') or ''
+if ARGV[6] ~= ''
+    or (draw_offer_by == 'player1' and ARGV[3] == 'b')
+    or (draw_offer_by == 'player2' and ARGV[3] == 'w') then
+    redis.call('HSET', KEYS[1], 'game_draw_offer', '')
+end
 if ARGV[6] == '' then
     local turn_limit_ms = tonumber(redis.call('HGET', KEYS[1], 'timer_seconds') or '30') * 1000
     redis.call('HSET', KEYS[1], next_clock_field, turn_limit_ms)
@@ -878,13 +895,16 @@ def list_public_rooms(limit: int = 100) -> list[dict[str, Any]]:
     return rooms
 
 
-def append_chat_message(room_id: int, message: dict[str, Any]) -> None:
+def append_chat_message(room_id: int, message: dict[str, Any]) -> bool:
     """Persist a room chat event while bounding storage to the latest 100 messages."""
-    key = _chat_history_key(room_id)
-    pipeline = redis_client.pipeline(transaction=True)
-    pipeline.rpush(key, json.dumps(message, ensure_ascii=False, separators=(",", ":")))
-    pipeline.ltrim(key, -100, -1)
-    pipeline.execute()
+    result = redis_client.eval(
+        _APPEND_CHAT_MESSAGE_SCRIPT,
+        2,
+        _room_key(room_id),
+        _chat_history_key(room_id),
+        json.dumps(message, ensure_ascii=False, separators=(",", ":")),
+    )
+    return bool(result)
 
 
 def get_chat_history(room_id: int) -> list[dict[str, Any]]:
@@ -909,7 +929,9 @@ def join_room(
     elo: int | None = None,
 ) -> str | None:
     """Atomically assign player two or a spectator role to a joining token."""
-    was_player_two = redis_client.hget(_room_key(room_id), "player2_token") == participant_token
+    normalized_name = (participant_name or "Kỳ hữu").strip() or "Kỳ hữu"
+    user_id_value = str(user_id) if user_id is not None else ""
+    elo_value = str(elo) if user_id is not None and elo is not None else ""
     result = redis_client.eval(
         _JOIN_ROOM_SCRIPT,
         3,
@@ -917,22 +939,15 @@ def join_room(
         _participants_key(room_id),
         _spectators_key(room_id),
         participant_token,
+        normalized_name,
+        user_id_value,
+        elo_value,
     )
     if result == -1:
         return None
     if result == -2:
         return "spectators_disabled"
-    role = str(result)
-    if role == "player2" and not was_player_two:
-        redis_client.hset(
-            _room_key(room_id),
-            mapping={
-                "player2_name": (participant_name or "Kỳ hữu").strip() or "Kỳ hữu",
-                "player2_user_id": user_id or "",
-                "player2_elo": elo if user_id is not None and elo is not None else "",
-            },
-        )
-    return role
+    return str(result)
 
 
 def get_room_identity(room_id: int) -> dict[str, int | str | None] | None:

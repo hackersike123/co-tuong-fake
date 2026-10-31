@@ -326,6 +326,10 @@ def _process_rematch(
     if role not in {"player1", "player2"}:
         return {"type": "error", "reason": "players_only"}
     try:
+        game = get_game_snapshot(room_id)
+        if game is not None and game["status"] == "finished":
+            if record_completed_match(room_id) is None:
+                return {"type": "error", "reason": "match_persistence_unavailable"}
         result = request_rematch(room_id, participant_token, role)
         room = get_room(room_id)
     except RedisError:
@@ -1002,12 +1006,14 @@ def leave_public_room(
             raise _service_unavailable() from exc
         if game is None:
             raise _room_not_found()
-        record_completed_match(
+        persisted_match = record_completed_match(
             room_id,
             additional_access_tokens={
                 payload.participant_token: "player1" if result == 4 else "player2"
             },
         )
+        if persisted_match is None:
+            raise _service_unavailable()
         loser_role = "player1" if result == 4 else "player2"
         event = {
             "type": "game.forfeit",
@@ -1362,6 +1368,20 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             )
         while True:
             message = await websocket.receive_json()
+            if isinstance(message, dict) and message.get("type") != "ping":
+                try:
+                    active_role = await run_in_threadpool(
+                        get_participant_role,
+                        room_id,
+                        participant_token,
+                    )
+                except RedisError:
+                    logger.exception("Could not revalidate room participant for room %s", room_id)
+                    await websocket.close(code=1011, reason="Room service is unavailable")
+                    break
+                if active_role != role:
+                    await websocket.close(code=4403, reason="Room access was revoked")
+                    break
             if isinstance(message, dict) and message.get("type") == "ping":
                 await room_hub.send_to_client(websocket, {"type": "pong"})
             elif isinstance(message, dict) and message.get("type") == "call_signal":
@@ -1401,7 +1421,7 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
                     "sent_at": int(time.time() * 1000),
                 }
                 try:
-                    await run_in_threadpool(append_chat_message, room_id, chat_event)
+                    saved = await run_in_threadpool(append_chat_message, room_id, chat_event)
                 except RedisError:
                     logger.exception("Could not save chat message for room %s", room_id)
                     await room_hub.send_to_client(
@@ -1409,6 +1429,9 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
                         {"type": "error", "reason": "chat_service_unavailable"},
                     )
                     continue
+                if not saved:
+                    await websocket.close(code=4403, reason="Room access was revoked")
+                    break
                 await room_hub.broadcast_room(room_id, chat_event)
             elif isinstance(message, dict) and message.get("type") == "ready":
                 ready = message.get("ready", True)

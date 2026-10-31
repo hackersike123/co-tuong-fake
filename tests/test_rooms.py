@@ -1,7 +1,9 @@
 """Tests for Redis-backed public room lifecycle and participant roles."""
 
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 import json
+from threading import Event
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
@@ -282,6 +284,108 @@ def test_room_chat_is_validated_and_broadcast_over_websocket(
             assert snapshot["type"] == "room.snapshot"
             assert snapshot["game"]["notation"] == "1. b9-a7"
             assert snapshot["chat_history"] == [host_message]
+
+
+def test_chat_append_cannot_recreate_history_after_room_deletion(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, fake_redis = rooms_client
+    host = client.post("/api/v1/rooms/", json={"room_name": "Chat cleanup"}).json()
+    room_id = host["room_id"]
+    chat_key = room_store._chat_history_key(room_id)
+    room_store.append_chat_message(room_id, {"id": "before-delete", "text": "saved"})
+
+    deleted = client.post(
+        f"/api/v1/rooms/{room_id}/leave",
+        json={"participant_token": host["participant_token"]},
+    )
+
+    assert deleted.status_code == 200
+    assert fake_redis.exists(chat_key) == 0
+    assert room_store.append_chat_message(
+        room_id,
+        {"id": "after-delete", "text": "must not recreate the key"},
+    ) is False
+    assert fake_redis.exists(chat_key) == 0
+
+
+def test_deleted_room_closes_stale_socket_before_accepting_chat(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, fake_redis = rooms_client
+    host = client.post("/api/v1/rooms/", json={"room_name": "Stale socket"}).json()
+    opponent = client.post(
+        f"/api/v1/rooms/{host['room_id']}/join",
+        json={},
+    ).json()
+    room_id = host["room_id"]
+    socket_path = f"/api/v1/rooms/{room_id}/ws?participant_token={opponent['participant_token']}"
+
+    with client.websocket_connect(socket_path) as websocket:
+        assert websocket.receive_json()["type"] == "room.snapshot"
+        deleted = client.post(
+            f"/api/v1/rooms/{room_id}/leave",
+            json={"participant_token": host["participant_token"]},
+        )
+        assert deleted.status_code == 200
+        assert websocket.receive_json()["type"] == "room.closed"
+        websocket.send_json({"type": "chat_message", "text": "after deletion"})
+        with pytest.raises(WebSocketDisconnect) as closed:
+            websocket.receive_json()
+
+    assert closed.value.code == 4403
+    assert fake_redis.exists(room_store._chat_history_key(room_id)) == 0
+
+
+def test_player_two_identity_stays_with_the_current_seat_occupant(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = rooms_client
+    host = client.post("/api/v1/rooms/", json={"room_name": "Seat identity race"}).json()
+    room_id = host["room_id"]
+    stale_token = "stale-player-two-token-000000000000"
+    current_token = "current-player-two-token-000000000000"
+    stale_write_started = Event()
+    release_stale_write = Event()
+    original_hset = room_store.redis_client.hset
+
+    def delay_stale_identity_write(*args: Any, **kwargs: Any) -> Any:
+        mapping = kwargs.get("mapping")
+        if mapping and mapping.get("player2_name") == "Stale player":
+            stale_write_started.set()
+            assert release_stale_write.wait(5)
+        return original_hset(*args, **kwargs)
+
+    monkeypatch.setattr(room_store.redis_client, "hset", delay_stale_identity_write)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        stale_join = executor.submit(
+            room_store.join_room,
+            room_id,
+            stale_token,
+            participant_name="Stale player",
+            user_id=101,
+            elo=901,
+        )
+        intercepted = stale_write_started.wait(2)
+        try:
+            assert intercepted or stale_join.done()
+            assert room_store.leave_room(room_id, stale_token) == 1
+            assert room_store.join_room(
+                room_id,
+                current_token,
+                participant_name="Current player",
+                user_id=202,
+                elo=1102,
+            ) == "player2"
+        finally:
+            release_stale_write.set()
+        assert stale_join.result(timeout=5) == "player2"
+
+    identity = room_store.get_room_identity(room_id)
+    assert identity is not None
+    assert identity["black_player"] == "Current player"
+    assert identity["black_user_id"] == 202
 
 
 def test_call_signaling_is_relayed_only_to_the_other_player(
@@ -666,6 +770,39 @@ def test_draw_offer_can_be_declined_then_accepted(
     assert history[0]["reason"] == "draw_agreement"
 
 
+def test_move_invalidates_a_pending_draw_offer(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host, opponent = _create_started_room(client, "Move invalidates draw offer")
+    room_id = host["room_id"]
+
+    offered = room_routes._process_offer_draw(
+        room_id, "player1", host["participant_token"]
+    )
+    move = room_routes._process_room_move(
+        room_id, "player1", {"from": [9, 1], "to": [7, 0]}
+    )
+    game_after_offerers_move = room_store.get_game_snapshot(room_id)
+    opponent_move = room_routes._process_room_move(
+        room_id, "player2", {"from": [0, 1], "to": [2, 0]}
+    )
+    stale_response = room_routes._process_draw_response(
+        room_id, "player1", host["participant_token"], True
+    )
+
+    game = room_store.get_game_snapshot(room_id)
+    assert offered["type"] == "draw_offered"
+    assert move["type"] == "move_made"
+    assert game_after_offerers_move is not None
+    assert game_after_offerers_move["draw_offer_by"] == "player1"
+    assert opponent_move["type"] == "move_made"
+    assert stale_response["reason"] == "no_pending_draw_offer"
+    assert game is not None
+    assert game["draw_offer_by"] is None
+    assert game["status"] == "playing"
+
+
 def test_rematch_waits_for_both_players_and_starts_a_new_round(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:
@@ -705,6 +842,45 @@ def test_rematch_waits_for_both_players_and_starts_a_new_round(
             game = client.get(f"/api/v1/rooms/{room_id}/game").json()
             assert game["round_number"] == 2
             assert game["notation"] == ""
+
+
+def test_rematch_persists_the_finished_round_before_resetting_it(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = rooms_client
+    host, opponent = _create_started_room(client, "Persist before rematch")
+    room_id = host["room_id"]
+    room = room_store.get_room(room_id)
+    assert room is not None
+    room_uuid = room["room_uuid"]
+    persist_match = room_routes.record_completed_match
+    monkeypatch.setattr(room_routes, "record_completed_match", lambda *_args, **_kwargs: None)
+
+    with client.websocket_connect(
+        f"/api/v1/rooms/{room_id}/ws?participant_token={host['participant_token']}"
+    ) as red_ws:
+        with client.websocket_connect(
+            f"/api/v1/rooms/{room_id}/ws?participant_token={opponent['participant_token']}"
+        ) as black_ws:
+            red_ws.receive_json()
+            black_ws.receive_json()
+            red_ws.send_json({"type": "resign"})
+            _receive_socket_event(red_ws, "game_over")
+            _receive_socket_event(black_ws, "game_over")
+            monkeypatch.setattr(room_routes, "record_completed_match", persist_match)
+
+            red_ws.send_json({"type": "rematch"})
+            _receive_socket_event(red_ws, "room.rematch_requested")
+            _receive_socket_event(black_ws, "room.rematch_requested")
+            black_ws.send_json({"type": "rematch"})
+            _receive_socket_event(red_ws, "room.rematch_started")
+            _receive_socket_event(black_ws, "room.rematch_started")
+
+    matches = match_service.list_match_history(room_id, room_uuid)
+    assert len(matches) == 1
+    assert matches[0].round_number == 1
+    assert matches[0].result == "resignation"
 
 
 def test_spectator_cannot_submit_a_move(
@@ -1324,6 +1500,31 @@ def test_lobby_manual_code_joins_the_selected_room(
     assert response.json()["role"] == "player2"
 
 
+def test_private_room_code_join_accepts_the_room_password(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    host = client.post(
+        "/api/v1/rooms/",
+        json={
+            "room_name": "Private code join",
+            "is_public": False,
+            "password": "room-password",
+        },
+    ).json()
+
+    denied = client.post("/api/v1/rooms/join", json={"room_code": host["room_code"]})
+    joined = client.post(
+        "/api/v1/rooms/join",
+        json={"room_code": host["room_code"], "password": "room-password"},
+    )
+
+    assert denied.status_code == 403
+    assert joined.status_code == 200
+    assert joined.json()["id"] == host["id"]
+    assert joined.json()["role"] == "player2"
+
+
 def test_lobby_manual_code_requires_numeric_input(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:
@@ -1665,6 +1866,27 @@ def test_host_voluntary_exit_forfeits_then_deletes_playing_room(
             assert _receive_socket_event(opponent_ws, "room.closed")["reason"] == "host_forfeit"
 
     assert client.get("/api/v1/rooms/1").status_code == 404
+
+
+def test_host_forfeit_retains_room_when_match_persistence_fails(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = rooms_client
+    host, _ = _create_started_room(client, "Forfeit persistence failure")
+    monkeypatch.setattr(room_routes, "record_completed_match", lambda *_args, **_kwargs: None)
+
+    response = client.post(
+        f"/api/v1/rooms/{host['room_id']}/leave",
+        json={"participant_token": host["participant_token"]},
+    )
+
+    assert response.status_code == 503
+    assert client.get(f"/api/v1/rooms/{host['room_id']}").status_code == 200
+    game = room_store.get_game_snapshot(host["room_id"])
+    assert game is not None
+    assert game["status"] == "finished"
+    assert game["result"] == "forfeit"
 
 
 def test_lobby_socket_snapshots_waiting_rooms_and_hides_started_rooms(
