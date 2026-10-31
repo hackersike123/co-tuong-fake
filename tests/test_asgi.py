@@ -1,6 +1,7 @@
 """ASGI, origin policy, and application lifespan regression tests."""
 
 import asyncio
+import logging
 
 import fakeredis
 import pytest
@@ -11,6 +12,7 @@ from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
 from app import main, otp_store, room_store
+from app.logging_config import UvicornAccessQueryFilter
 from app.settings import CORS_ALLOWED_ORIGINS, _normalize_origin
 
 
@@ -72,6 +74,28 @@ def test_rest_cors_does_not_grant_an_unconfigured_origin() -> None:
 def test_origin_configuration_rejects_wildcards(origin: str) -> None:
     with pytest.raises(ValueError, match="Invalid CORS origin"):
         _normalize_origin(origin)
+
+
+def test_uvicorn_access_logs_redact_websocket_query_tokens() -> None:
+    record = logging.LogRecord(
+        name="uvicorn.access",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg='%s - "%s %s HTTP/%s" %d',
+        args=(
+            "127.0.0.1:1234",
+            "GET",
+            "/api/v1/rooms/7/ws?participant_token=secret-token",
+            "1.1",
+            101,
+        ),
+        exc_info=None,
+    )
+
+    assert UvicornAccessQueryFilter().filter(record)
+    assert "secret-token" not in record.getMessage()
+    assert "/api/v1/rooms/7/ws HTTP/1.1" in record.getMessage()
 
 
 def test_untrusted_websocket_origin_is_rejected_before_route_authentication() -> None:

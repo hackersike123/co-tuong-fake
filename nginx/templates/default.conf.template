@@ -1,0 +1,30 @@
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+log_format no_query '$remote_addr - $remote_user [$time_local] '
+                    '"$request_method $uri $server_protocol" $status $body_bytes_sent '
+                    '$request_time $upstream_response_time "$http_user_agent"';
+
+upstream fastapi_backend {
+    server ${NGINX_BACKEND_UPSTREAM};
+}
+
+upstream vite_frontend {
+    server ${NGINX_FRONTEND_UPSTREAM};
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    access_log /var/log/nginx/access.log no_query;
+
+    include /etc/nginx/snippets/proxy-routes.conf;
+
+    location / {
+        include /etc/nginx/snippets/proxy-headers.conf;
+        proxy_pass http://vite_frontend;
+    }
+}

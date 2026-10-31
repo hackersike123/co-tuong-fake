@@ -116,6 +116,83 @@ the exact frontend origin(s) when deploying; wildcard origins are rejected.
 The same allowlist is checked on every WebSocket handshake before its endpoint
 can accept the connection.
 
+## Nginx reverse proxy (local)
+
+The current Compose file runs Redis; FastAPI and Vite remain host processes.
+The Nginx container reaches those host services through `host.docker.internal`
+and listens only on `127.0.0.1:8002` by default. Start Vite with `pnpm dev` on
+port 8443. On Windows, a backend bound only to loopback is not reachable from a
+Docker container; for the local proxy, run the backend with:
+
+```powershell
+$env:UVICORN_HOST = "0.0.0.0"
+.\scripts\run-backend.ps1
+```
+
+Then start Nginx and Redis with `docker compose up -d`, and check its config:
+
+```powershell
+docker compose config
+docker compose exec nginx nginx -t
+docker compose ps
+```
+
+Open <http://127.0.0.1:8002>. The proxy keeps request paths and query strings
+unchanged: `/api`, `/api/*`, and `/ws` go to FastAPI, while all other paths go
+to Vite in development. The current room and PvE WebSockets use
+`/api/v1/rooms/.../ws` and `/api/v1/pve/ws`, so they pass through the `/api`
+location without changing their paths or message formats. `proxy_pass` has no
+URI suffix, which preserves the `/api` prefix. Authorization, cookies, and
+query parameters are forwarded. Access logs use `$uri` instead of `$request`,
+so they omit query-string tokens. `X-Forwarded-For` is replaced with the
+connection address observed by Nginx rather than trusting a client-supplied
+forwarded value. The Uvicorn application logging filter also removes query
+strings from backend access log records.
+
+Nginx uses HTTP/1.1 Upgrade headers and 300-second proxy read/write timeouts.
+The Uvicorn runners set protocol-level WebSocket pings to 20 seconds; browser
+WebSocket clients automatically answer those control-frame pings. The room
+endpoint also retains its existing JSON `ping`/`pong` messages.
+
+In production, `pnpm build` emits static files to `dist/`; the production Nginx
+template serves those files and falls back to `index.html` for SPA routes. The
+repo currently has no Backend or Frontend Compose service, so the production
+upstream must be set to the real FastAPI host/service name. No domain or valid
+certificate is configured in this checkout, so the local HTTP configuration is
+active and HTTPS/WSS has not been claimed as working.
+
+## Nginx HTTPS/WSS setup (when a domain is available)
+
+Production support is prepared in `compose.acme.yaml`, `compose.production.yaml`,
+`compose.certbot.yaml`, and
+`nginx/production-https.conf.template.example`. Compose v2.24.4 or newer is
+required for the production overrides. Keep Let's Encrypt state and the ACME
+webroot outside the repository; `.gitignore` also excludes the conventional
+`letsencrypt/` and `certbot/` folders. Set `NGINX_SERVER_NAME`,
+`NGINX_BACKEND_UPSTREAM`, `CERTBOT_EMAIL`, `LETSENCRYPT_DIR`, and
+`CERTBOT_WEBROOT_DIR` in the ignored `.env` file, using a domain you control
+and the actual Backend upstream. Point DNS at the server and allow inbound TCP
+ports 80 and 443 before issuing a certificate.
+
+Start the temporary HTTP-01 challenge server, issue the certificate, then
+switch to the HTTPS/WSS config:
+
+```bash
+docker compose -f compose.yaml -f compose.acme.yaml up -d nginx
+docker compose -f compose.yaml -f compose.acme.yaml -f compose.certbot.yaml \
+  --profile certbot run --rm --entrypoint sh certbot -c \
+  'certbot certonly --webroot -w /var/www/certbot -d "$CERTBOT_DOMAIN" --email "$CERTBOT_EMAIL" --agree-tos --no-eff-email'
+docker compose -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml up -d nginx
+docker compose -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml exec nginx nginx -t
+```
+
+The production config redirects HTTP to HTTPS, keeps the ACME challenge path
+available, and serves the same API/WebSocket proxy over TLS. Schedule
+`bash scripts/renew-certbot.sh` daily with the host's cron or systemd timer; it
+runs `certbot renew` and reloads Nginx. The certificate request, HTTPS/WSS
+handshake, and renewal flow remain unverified until a real domain resolves to
+the deployment host and a trusted certificate is issued.
+
 The API uses SQLite by default and creates `co_tuong.db` when it starts. Open
 <http://127.0.0.1:8000/docs> to try the endpoints.
 

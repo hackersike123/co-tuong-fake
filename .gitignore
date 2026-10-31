@@ -17,6 +17,8 @@ logs/
 *.log
 .claude-replay.*
 .tmp-*
+/letsencrypt/
+/certbot/
 /.figma/design-context/
 /.plugins/
 /.opencode-skills/
