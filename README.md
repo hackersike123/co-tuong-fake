@@ -12,7 +12,11 @@ OpenAPI tiếp tục dùng HTTP.
 lệnh tài khoản/phòng/PvE dùng `ws(s)://<backend>/api/v1/ws` theo dạng:
 
 ```json
-{"id":"request-1","event":"room.create","data":{"room_name":"Bàn cờ","host_name":"Kỳ hữu"}}
+{
+  "id": "request-1",
+  "event": "room.create",
+  "data": { "room_name": "Bàn cờ", "host_name": "Kỳ hữu" }
+}
 ```
 
 Server trả về cùng `id`, `event` kết thúc bằng `.result`, `ok` và `data` hoặc
@@ -74,6 +78,7 @@ cách cấu hình chi tiết nằm ở các mục backend bên dưới.
 
    Set `JWT_SECRET` to a random value of at least 32 characters. Configure SMTP
    credentials before trying registration, password reset, or email invitations.
+
 2. Start Redis:
 
    ```powershell
@@ -137,7 +142,10 @@ docker compose exec nginx nginx -t
 docker compose ps
 ```
 
-Open <http://127.0.0.1:8002>. The proxy keeps request paths and query strings
+Open <http://127.0.0.1:8002>. If you want the browser's API and WebSocket
+traffic to pass through Nginx instead of connecting directly to port 8000, set
+`VITE_API_BASE_URL=http://127.0.0.1:8002` before starting Vite and restart the
+dev server. The proxy keeps request paths and query strings
 unchanged: `/api`, `/api/*`, and `/ws` go to FastAPI, while all other paths go
 to Vite in development. The current room and PvE WebSockets use
 `/api/v1/rooms/.../ws` and `/api/v1/pve/ws`, so they pass through the `/api`
@@ -154,12 +162,16 @@ The Uvicorn runners set protocol-level WebSocket pings to 20 seconds; browser
 WebSocket clients automatically answer those control-frame pings. The room
 endpoint also retains its existing JSON `ping`/`pong` messages.
 
-In production, `pnpm build` emits static files to `dist/`; the production Nginx
-template serves those files and falls back to `index.html` for SPA routes. The
-repo currently has no Backend or Frontend Compose service, so the production
-upstream must be set to the real FastAPI host/service name. No domain or valid
-certificate is configured in this checkout, so the local HTTP configuration is
-active and HTTPS/WSS has not been claimed as working.
+In production, set `VITE_API_BASE_URL` to the public HTTPS origin (for example,
+`https://chess.example`) before running `pnpm build`; Vite embeds `VITE_*`
+values in the generated JavaScript, so changing Nginx's runtime environment
+cannot update the URL afterward. Do not use the internal
+`NGINX_BACKEND_UPSTREAM` value here. `pnpm build` emits static files to `dist/`;
+the production Nginx template serves those files and falls back to `index.html`
+for SPA routes. The repo currently has no Backend or Frontend Compose service,
+so the production upstream must be set to the real FastAPI host/service name.
+No domain or valid certificate is configured in this checkout, so the local
+HTTP configuration is active and HTTPS/WSS has not been claimed as working.
 
 ## Nginx HTTPS/WSS setup (when a domain is available)
 
