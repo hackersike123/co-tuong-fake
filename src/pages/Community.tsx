@@ -1,5 +1,5 @@
-import { useState } from "react"
-import { Badge, Button, InputField, SelectField } from "@figma/astraui"
+import { useState } from "react";
+import { Badge, Button, InputField, SelectField } from "@figma/astraui";
 import {
   ArrowDown,
   ArrowRight,
@@ -18,29 +18,28 @@ import {
   Target,
   TrendingUp,
   Trophy,
-} from "lucide-react"
-import { EmptyState, Heading, SectionTitle, UserAvatar } from "../components"
-import { useApp } from "../context"
-import { gameHistory, getDemoRankings, playerInitials, resultLabels } from "../data"
-import { useExperience } from "../experience/Experience"
-import { RankBadge, RankProgress } from "../rank-ui"
-import { CULTIVATION_LAYERS } from "../ranks"
-import { PodiumAvatar, type PodiumRank } from "../experience/PodiumAvatar"
+} from "lucide-react";
+import { EmptyState, Heading, SectionTitle, UserAvatar } from "../components";
+import { useApp } from "../context";
+import { gameHistory, getDemoRankings, playerInitials, resultLabels } from "../data";
+import { useExperience } from "../experience/Experience";
+import { RankBadge, RankProgress } from "../rank-ui";
+import { CULTIVATION_LAYERS } from "../ranks";
+import { PodiumAvatar, type PodiumRank } from "../experience/PodiumAvatar";
 
 export function History() {
-  const { viewRecord, go, signedIn } = useApp()
-  const { demoElo } = useExperience()
-  const [filter, setFilter] = useState("all")
-  const [range, setRange] = useState("all")
-  const [query, setQuery] = useState("")
-  const [visible, setVisible] = useState(6)
+  const { viewRecord, go, signedIn } = useApp();
+  const { demoElo } = useExperience();
+  const [filter, setFilter] = useState("all");
+  const [range, setRange] = useState("all");
+  const [query, setQuery] = useState("");
+  const [visible, setVisible] = useState(6);
   const records = gameHistory.filter(
     (game) =>
       (filter === "all" || game.result === filter) &&
       game.opponent.toLowerCase().includes(query.toLowerCase()) &&
-      (range === "all" ||
-        game.day >= (range === "week" ? "2026-05-18" : "2026-05-01")),
-  )
+      (range === "all" || game.day >= (range === "week" ? "2026-05-18" : "2026-05-01")),
+  );
   return (
     <div className="page-stack history-page">
       <div className="page-heading-row">
@@ -51,11 +50,7 @@ export function History() {
             Nhìn lại những ván đã qua. Vững vàng cho nước cờ sắp tới.
           </div>
         </div>
-        <Button
-          variant="neutral"
-          iconStart={<SwordsSmall />}
-          onClick={() => go("rooms")}
-        >
+        <Button variant="neutral" iconStart={<SwordsSmall />} onClick={() => go("rooms")}>
           Chơi một ván mới
         </Button>
       </div>
@@ -78,7 +73,7 @@ export function History() {
           {
             icon: Target,
             label: "Elo hiện tại",
-              value: (signedIn ? demoElo : 1000).toLocaleString("vi-VN"),
+            value: (signedIn ? demoElo : 1000).toLocaleString("vi-VN"),
             tone: "sand",
             extra: "+48 Elo trong tuần này",
           },
@@ -98,9 +93,7 @@ export function History() {
       <section className="surface history-list">
         <div className="section-title">
           <Heading>Lịch sử ván đấu</Heading>
-          <span className="small muted">
-            {signedIn ? gameHistory.length : 0} ván gần đây
-          </span>
+          <span className="small muted">{signedIn ? gameHistory.length : 0} ván gần đây</span>
         </div>
         <div className="history-filters">
           <div className="result-filters">
@@ -114,9 +107,7 @@ export function History() {
                 variant="subtle"
                 size="small"
                 key={option.id}
-                className={`filter-chip ${
-                  filter === option.id ? "active" : ""
-                }`}
+                className={`filter-chip ${filter === option.id ? "active" : ""}`}
                 onClick={() => setFilter(option.id)}
               >
                 {option.label}
@@ -156,9 +147,9 @@ export function History() {
             description="Thử thay đổi bộ lọc hoặc bắt đầu một ván cờ mới."
             action="Xóa bộ lọc"
             onAction={() => {
-              setFilter("all")
-              setRange("all")
-              setQuery("")
+              setFilter("all");
+              setRange("all");
+              setQuery("");
             }}
           />
         ) : (
@@ -180,11 +171,7 @@ export function History() {
                     <tr key={game.id}>
                       <td>
                         <div className="inline">
-                          <UserAvatar
-                            initials={game.initials}
-                            tone={game.tone}
-                            elo={game.elo}
-                          />
+                          <UserAvatar initials={game.initials} tone={game.tone} elo={game.elo} />
                           <div>
                             <div className="player-name">{game.opponent}</div>
                             <div className="small muted">
@@ -200,11 +187,7 @@ export function History() {
                         </span>
                       </td>
                       <td>
-                        <span
-                          className={`elo-change ${
-                            game.change > 0 ? "positive" : "negative"
-                          }`}
-                        >
+                        <span className={`elo-change ${game.change > 0 ? "positive" : "negative"}`}>
                           {game.change > 0 ? "+" : ""}
                           {game.change}
                         </span>
@@ -233,10 +216,7 @@ export function History() {
             </div>
             {records.length > visible && (
               <div className="load-more">
-                <Button
-                  variant="neutral"
-                  onClick={() => setVisible((n) => n + 6)}
-                >
+                <Button variant="neutral" onClick={() => setVisible((n) => n + 6)}>
                   Xem thêm ván đấu
                 </Button>
               </div>
@@ -249,33 +229,32 @@ export function History() {
         <span>Thắng thua là kết quả. Tiến bộ mới là hành trình.</span>
       </div>
     </div>
-  )
+  );
 }
 
 function SwordsSmall() {
-  return <Flag size={16} />
+  return <Flag size={16} />;
 }
 
 export function Leaderboard() {
-  const { username, signedIn, go, openModal } = useApp()
-  const { demoElo } = useExperience()
-  const players = getDemoRankings(demoElo)
-  const myPosition = players.findIndex((player) => player.username === "MinhAnh") + 1
-  const [query, setQuery] = useState("")
-  const [visible, setVisible] = useState(8)
+  const { username, signedIn, go, openModal } = useApp();
+  const { demoElo } = useExperience();
+  const players = getDemoRankings(demoElo);
+  const myPosition = players.findIndex((player) => player.username === "MinhAnh") + 1;
+  const [query, setQuery] = useState("");
+  const [visible, setVisible] = useState(8);
   const filtered = players.filter((p) =>
     `${p.name} ${p.username} ${p.username === "MinhAnh" && signedIn ? username : ""}`
-      .toLowerCase().includes(query.toLowerCase()),
-  )
+      .toLowerCase()
+      .includes(query.toLowerCase()),
+  );
   return (
     <div className="page-stack leaderboard-page">
       <div className="page-heading-row">
         <div>
           <div className="eyebrow">VƯƠN TẦM KỲ THỦ</div>
           <Heading level={1}>Bảng Phong Thần</Heading>
-          <div className="muted mt-xs">
-            Tôn vinh bản lĩnh. Truyền cảm hứng cho từng nước cờ.
-          </div>
+          <div className="muted mt-xs">Tôn vinh bản lĩnh. Truyền cảm hứng cho từng nước cờ.</div>
         </div>
         <div className="ranking-season">
           <span className="quick-icon tone-sand">
@@ -290,8 +269,8 @@ export function Leaderboard() {
       {!query && (
         <div className="podium-grid" aria-label="Vinh danh ba kỳ thủ dẫn đầu">
           {players.slice(0, 3).map((player, i) => {
-            const rank = (i + 1) as PodiumRank
-            const current = player.username === "MinhAnh" && signedIn
+            const rank = (i + 1) as PodiumRank;
+            const current = player.username === "MinhAnh" && signedIn;
             return (
               <section
                 key={player.username}
@@ -320,7 +299,7 @@ export function Leaderboard() {
                   <span>{player.rate}% thắng</span>
                 </div>
               </section>
-            )
+            );
           })}
         </div>
       )}
@@ -353,14 +332,24 @@ export function Leaderboard() {
           </Button>
         </div>
       )}
-      <div className="between realm-explainer"><span className="small muted">13 cảnh giới · {CULTIVATION_LAYERS} tầng mỗi bậc · Ngưỡng Elo riêng cho bản demo</span><Button variant="subtle" size="small" iconEnd={<ArrowRight size={14} />} onClick={() => openModal("ranks")}>Lộ trình tu luyện</Button></div>
+      <div className="between realm-explainer">
+        <span className="small muted">
+          13 cảnh giới · {CULTIVATION_LAYERS} tầng mỗi bậc · Ngưỡng Elo riêng cho bản demo
+        </span>
+        <Button
+          variant="subtle"
+          size="small"
+          iconEnd={<ArrowRight size={14} />}
+          onClick={() => openModal("ranks")}
+        >
+          Lộ trình tu luyện
+        </Button>
+      </div>
       <section className="surface ranking-table-panel">
         <div className="section-title">
           <div>
             <Heading>Những kỳ thủ hàng đầu</Heading>
-            <div className="muted small mt-xs">
-              Cùng học hỏi từ cộng đồng Kỳ Tiên Hội.
-            </div>
+            <div className="muted small mt-xs">Cùng học hỏi từ cộng đồng Kỳ Tiên Hội.</div>
           </div>
           <div className="ranking-search">
             <InputField
@@ -388,11 +377,8 @@ export function Leaderboard() {
                 </thead>
                 <tbody>
                   {filtered.slice(0, visible).map((player) => {
-                    const rank =
-                      players.findIndex(
-                        (p) => p.username === player.username,
-                      ) + 1
-                    const current = player.username === "MinhAnh" && signedIn
+                    const rank = players.findIndex((p) => p.username === player.username) + 1;
+                    const current = player.username === "MinhAnh" && signedIn;
                     return (
                       <tr
                         key={player.username}
@@ -435,9 +421,7 @@ export function Leaderboard() {
                             <div>
                               <div className="player-name">
                                 {current ? username : player.username}
-                                {current && (
-                                  <Badge label="Bạn" variant="brand" />
-                                )}
+                                {current && <Badge label="Bạn" variant="brand" />}
                               </div>
                               <RankBadge elo={player.elo} compact />
                             </div>
@@ -460,11 +444,7 @@ export function Leaderboard() {
                         <td>
                           <span
                             className={`rank-change ${
-                              player.change > 0
-                                ? "up"
-                                : player.change < 0
-                                  ? "down"
-                                  : ""
+                              player.change > 0 ? "up" : player.change < 0 ? "down" : ""
                             }`}
                           >
                             {player.change > 0 ? (
@@ -478,17 +458,14 @@ export function Leaderboard() {
                           </span>
                         </td>
                       </tr>
-                    )
+                    );
                   })}
                 </tbody>
               </table>
             </div>
             {filtered.length > visible && (
               <div className="load-more">
-                <Button
-                  variant="neutral"
-                  onClick={() => setVisible((n) => n + 8)}
-                >
+                <Button variant="neutral" onClick={() => setVisible((n) => n + 8)}>
                   Tải thêm kỳ thủ
                 </Button>
               </div>
@@ -504,16 +481,16 @@ export function Leaderboard() {
         )}
       </section>
     </div>
-  )
+  );
 }
 
 export function Profile() {
-  const { username, profileTone, go, openModal, viewRecord, signedIn } =
-    useApp()
-  const { demoElo, avatar } = useExperience()
-  const [empty, setEmpty] = useState(!signedIn)
-  const profileElo = empty ? 1000 : demoElo
-  const position = getDemoRankings(demoElo).findIndex((player) => player.username === "MinhAnh") + 1
+  const { username, profileTone, go, openModal, viewRecord, signedIn } = useApp();
+  const { demoElo, avatar } = useExperience();
+  const [empty, setEmpty] = useState(!signedIn);
+  const profileElo = empty ? 1000 : demoElo;
+  const position =
+    getDemoRankings(demoElo).findIndex((player) => player.username === "MinhAnh") + 1;
   return (
     <div className="page-stack profile-page">
       <div className="page-heading-row">
@@ -523,7 +500,13 @@ export function Profile() {
           <div className="muted mt-xs">Mỗi ngày một nước cờ tốt hơn.</div>
         </div>
         <div className="inline profile-actions">
-          <Button variant="neutral" iconStart={<Pencil size={16} />} onClick={() => openModal("edit")}>Chỉnh sửa hồ sơ</Button>
+          <Button
+            variant="neutral"
+            iconStart={<Pencil size={16} />}
+            onClick={() => openModal("edit")}
+          >
+            Chỉnh sửa hồ sơ
+          </Button>
         </div>
       </div>
       <section className="surface profile-hero">
@@ -549,14 +532,16 @@ export function Profile() {
               <Calendar size={13} />
               Tham gia từ tháng 3, 2026
             </div>
-            <div className="tiny muted mt-xs">{avatar && !empty ? "Ảnh lưu cục bộ · chưa tải lên máy chủ" : "Hồ sơ và cảnh giới demo"}</div>
+            <div className="tiny muted mt-xs">
+              {avatar && !empty
+                ? "Ảnh lưu cục bộ · chưa tải lên máy chủ"
+                : "Hồ sơ và cảnh giới demo"}
+            </div>
           </div>
         </div>
         <div className="profile-hero-stats">
           <div>
-            <span className="profile-stat-number">
-              {profileElo.toLocaleString("vi-VN")}
-            </span>
+            <span className="profile-stat-number">{profileElo.toLocaleString("vi-VN")}</span>
             <span className="muted">Điểm Elo</span>
           </div>
           <div>
@@ -564,13 +549,19 @@ export function Profile() {
             <span className="muted">Tổng số trận</span>
           </div>
           <div>
-            <span className="profile-stat-number">{empty ? "—" : String(position).padStart(2, "0")}</span>
+            <span className="profile-stat-number">
+              {empty ? "—" : String(position).padStart(2, "0")}
+            </span>
             <span className="muted">Hạng cộng đồng</span>
           </div>
         </div>
       </section>
       <section className="surface profile-cultivation">
-        <SectionTitle title="Hành trình tu luyện" action="Lộ trình 13 cảnh giới" onAction={() => openModal("ranks")} />
+        <SectionTitle
+          title="Hành trình tu luyện"
+          action="Lộ trình 13 cảnh giới"
+          onAction={() => openModal("ranks")}
+        />
         <RankProgress elo={profileElo} />
       </section>
       <div className="profile-content-grid">
@@ -596,9 +587,7 @@ export function Profile() {
                   <span className={`performance-dot ${stat.cls}`} />
                   <span className="grow">{stat.label}</span>
                   <strong>{empty ? "0" : stat.value}</strong>
-                  <span className="muted small">
-                    {empty ? "0" : stat.percent}%
-                  </span>
+                  <span className="muted small">{empty ? "0" : stat.percent}%</span>
                 </div>
               ))}
             </div>
@@ -614,17 +603,13 @@ export function Profile() {
                   className={`weekly-bar ${i === 5 ? "weekly-highlight" : ""}`}
                   style={{ height: `${empty ? 3 : n * 12}%` }}
                 />
-                <span className="small muted">
-                  {["T2", "T3", "T4", "T5", "T6", "T7", "CN"][i]}
-                </span>
+                <span className="small muted">{["T2", "T3", "T4", "T5", "T6", "T7", "CN"][i]}</span>
               </div>
             ))}
           </div>
           <div className="weekly-caption">
             <TrendingUp size={15} />
-            {empty
-              ? "Ván đầu tiên đang chờ bạn."
-              : "Chơi đều đặn, tiến bộ mỗi ngày."}
+            {empty ? "Ván đầu tiên đang chờ bạn." : "Chơi đều đặn, tiến bộ mỗi ngày."}
           </div>
         </section>
       </div>
@@ -692,22 +677,12 @@ export function Profile() {
                       {game.date}, {game.time}
                     </span>
                   </div>
-                  <span className={`result-tag ${game.result}`}>
-                    {resultLabels[game.result]}
-                  </span>
-                  <span
-                    className={`elo-change ${
-                      game.change > 0 ? "positive" : "negative"
-                    }`}
-                  >
+                  <span className={`result-tag ${game.result}`}>{resultLabels[game.result]}</span>
+                  <span className={`elo-change ${game.change > 0 ? "positive" : "negative"}`}>
                     {game.change > 0 ? "+" : ""}
                     {game.change} Elo
                   </span>
-                  <Button
-                    variant="neutral"
-                    size="small"
-                    onClick={() => viewRecord(game)}
-                  >
+                  <Button variant="neutral" size="small" onClick={() => viewRecord(game)}>
                     Xem lại
                     <ArrowUpRight size={14} />
                   </Button>
@@ -718,15 +693,11 @@ export function Profile() {
         </>
       )}
       <div className="profile-state-toggle">
-        <Button
-          variant="subtle"
-          size="small"
-          onClick={() => setEmpty((value) => !value)}
-        >
+        <Button variant="subtle" size="small" onClick={() => setEmpty((value) => !value)}>
           {empty ? "Xem hồ sơ có trận đấu" : "Xem trạng thái kỳ thủ mới"}
         </Button>
         <span className="small muted">Trạng thái minh họa</span>
       </div>
     </div>
-  )
+  );
 }

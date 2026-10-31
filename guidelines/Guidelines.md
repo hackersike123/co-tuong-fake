@@ -1,4 +1,5 @@
 <!-- make-kit-guidelines -->
+
 ## Design System Setup — MANDATORY
 
 This project depends on `@figma/astraui-kit` packages. Before writing
@@ -14,4 +15,5 @@ any code:
 3. Do not skip, modify, or improvise any setup steps.
 4. Read ALL other required .md files specified in guidelines/Guidelines.md.
 5. Verify that all required .md files have been read before proceeding.
+
 <!-- /make-kit-guidelines -->

@@ -8,107 +8,492 @@
     <style>
       :root {
         color-scheme: light;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-          "Segoe UI", sans-serif;
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
         background: #f4f1e8;
         color: #18312a;
         font-synthesis: none;
       }
-      * { box-sizing: border-box; }
-      body { margin: 0; min-height: 100vh; }
-      button, input { font: inherit; }
-      button { cursor: pointer; }
-      .page { width: min(1100px, calc(100% - 40px)); margin: 0 auto; padding: 48px 0 72px; }
-      .topbar, .section-heading, .room-heading, .modal-heading, .actions {
-        display: flex; align-items: center; justify-content: space-between; gap: 20px;
+      * {
+        box-sizing: border-box;
       }
-      .brand { display: flex; align-items: center; gap: 12px; font-weight: 750; letter-spacing: -.03em; }
-      .brand-mark { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 14px; background: #d3a650; color: #102b25; font-size: 22px; }
-      .eyebrow { margin: 0 0 12px; color: #b07c29; font-size: 12px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
-      .hero { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 28px; margin: 84px 0 56px; }
-      h1 { max-width: 650px; margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(42px, 7vw, 74px); font-weight: 500; letter-spacing: -.055em; line-height: .98; }
-      .hero-copy { max-width: 510px; margin: 22px 0 0; color: #62736b; font-size: 16px; line-height: 1.65; }
-      .primary, .secondary, .icon-button, .copy-button {
-        border: 0; border-radius: 12px; font-weight: 750; transition: transform .18s ease, background .18s ease;
+      body {
+        margin: 0;
+        min-height: 100vh;
       }
-      .primary { padding: 15px 20px; background: #b88635; color: #fffdf7; box-shadow: 0 10px 24px #8b652633; }
-      .primary:hover { transform: translateY(-2px); background: #a9782c; }
-      .secondary { padding: 11px 15px; background: #e8e3d7; color: #28483d; }
-      .secondary:hover { background: #ded7c7; }
-      .section { border-top: 1px solid #d8d3c7; padding-top: 24px; }
-      .section-heading { margin-bottom: 20px; }
-      h2 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 28px; font-weight: 500; }
-      .muted { color: #78857e; font-size: 13px; }
-      .room-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-      .room-card { padding: 20px; border: 1px solid #e0dbcf; border-radius: 18px; background: #fffdf8; box-shadow: 0 8px 24px #253c2c08; }
-      .room-heading { align-items: flex-start; }
-      .room-card h3 { margin: 0 0 7px; font-size: 17px; }
-      .room-code { color: #b07c29; font-size: 12px; font-weight: 800; letter-spacing: .1em; }
-      .room-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
-      .chip { padding: 7px 9px; border-radius: 999px; background: #f1eee5; color: #52635b; font-size: 12px; }
-      .room-join { width: 100%; margin-top: 18px; }
-      .room-panel { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin: -24px 0 56px; padding: 22px; border: 1px solid #d8d3c7; border-radius: 18px; background: #fffdf8; box-shadow: 0 12px 32px #253c2c0b; }
-      .room-panel[hidden] { display: none; }
-      .room-panel h2 { margin: 0; font-size: 27px; }
-      .room-panel p { margin: 7px 0 0; color: #718078; font-size: 13px; }
-      .room-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
-      .room-controls button[hidden] { display: none; }
-      .game-status { flex-basis: 100%; margin: 0; color: #80591e; font-size: 12px; }
-      .notation-list { display: grid; gap: 8px; max-height: 180px; margin: 10px 0 0; padding: 0; overflow: auto; list-style: none; }
-      .notation-list li { padding: 10px 12px; border: 1px solid #e1dccf; border-radius: 10px; background: #f8f6ef; font-size: 13px; }
-      .room-error { flex-basis: 100%; margin: 0; color: #a63e32; font-size: 12px; text-align: right; }
-      .empty { grid-column: 1 / -1; padding: 30px; border: 1px dashed #cfc9bb; border-radius: 18px; color: #718078; text-align: center; }
-      dialog { width: min(590px, calc(100% - 28px)); max-height: min(90vh, 820px); padding: 0; overflow: auto; border: 1px solid #e5dfd1; border-radius: 24px; background: #fffdf8; color: #18312a; box-shadow: 0 30px 90px #102b2555; }
-      dialog::backdrop { background: #0e211bcc; backdrop-filter: blur(5px); }
-      .dialog-body { padding: 30px; }
-      .modal-heading { margin-bottom: 26px; }
-      .modal-heading h2 { font-size: 32px; }
-      .modal-heading p { margin: 8px 0 0; color: #718078; font-size: 14px; }
-      .icon-button { width: 38px; height: 38px; background: #f0ede4; color: #445b51; font-size: 21px; }
-      .field { display: grid; gap: 8px; margin-bottom: 18px; }
-      .field > span, legend { color: #334c42; font-size: 13px; font-weight: 750; }
-      .field input[type="text"], .field input[type="password"] { width: 100%; min-height: 47px; padding: 0 13px; border: 1px solid #dcd7cb; border-radius: 11px; outline: 0; background: #fff; color: #18312a; }
-      .field input:focus { border-color: #b88635; box-shadow: 0 0 0 3px #b8863522; }
-      .helper { color: #78857e; font-size: 12px; line-height: 1.45; }
-      fieldset { margin: 0 0 19px; padding: 0; border: 0; }
-      .choice-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 10px; }
-      .choice-row.two { grid-template-columns: repeat(2, 1fr); }
-      .choice { position: relative; }
-      .choice input { position: absolute; opacity: 0; }
-      .choice span { display: grid; min-height: 46px; place-items: center; border: 1px solid #dfdacd; border-radius: 11px; background: #fff; color: #596b62; font-size: 13px; font-weight: 700; cursor: pointer; }
-      .choice input:checked + span { border-color: #b88635; background: #f8f0df; color: #80591e; box-shadow: inset 0 0 0 1px #b88635; }
-      .choice input:focus-visible + span { outline: 3px solid #b8863566; outline-offset: 2px; }
-      .toggle-row { display: flex; align-items: flex-start; gap: 11px; padding: 14px; border: 1px solid #e2ddd1; border-radius: 13px; background: #faf8f1; }
-      .toggle-row input { width: 17px; height: 17px; margin: 2px 0 0; accent-color: #a9782c; }
-      .toggle-row strong { display: block; font-size: 13px; }
-      .toggle-row small { display: block; margin-top: 4px; color: #78857e; font-size: 12px; line-height: 1.4; }
-      .form-error { min-height: 20px; margin: 0 0 12px; color: #a63e32; font-size: 13px; }
-      .actions { justify-content: flex-end; margin-top: 24px; }
-      .actions .primary { min-width: 155px; }
-      .result { width: min(520px, calc(100% - 28px)); }
-      .result .dialog-body { padding: 28px; }
-      .result-label { margin: 17px 0 6px; color: #78857e; font-size: 12px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
-      .result-value { overflow-wrap: anywhere; padding: 12px; border: 1px solid #e1dccf; border-radius: 10px; background: #f8f6ef; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; }
-      .copy-button { margin-top: 8px; padding: 9px 12px; background: #e8e3d7; color: #28483d; font-size: 12px; }
-      .result .actions { margin-top: 22px; }
-      .toast { position: fixed; right: 24px; bottom: 24px; padding: 12px 16px; border-radius: 12px; background: #18312a; color: white; box-shadow: 0 12px 32px #102b2533; opacity: 0; transform: translateY(8px); pointer-events: none; transition: .2s; }
-      .toast.show { opacity: 1; transform: translateY(0); }
+      button,
+      input {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      .page {
+        width: min(1100px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 48px 0 72px;
+      }
+      .topbar,
+      .section-heading,
+      .room-heading,
+      .modal-heading,
+      .actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-weight: 750;
+        letter-spacing: -0.03em;
+      }
+      .brand-mark {
+        display: grid;
+        width: 42px;
+        height: 42px;
+        place-items: center;
+        border-radius: 14px;
+        background: #d3a650;
+        color: #102b25;
+        font-size: 22px;
+      }
+      .eyebrow {
+        margin: 0 0 12px;
+        color: #b07c29;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+      .hero {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: end;
+        gap: 28px;
+        margin: 84px 0 56px;
+      }
+      h1 {
+        max-width: 650px;
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: clamp(42px, 7vw, 74px);
+        font-weight: 500;
+        letter-spacing: -0.055em;
+        line-height: 0.98;
+      }
+      .hero-copy {
+        max-width: 510px;
+        margin: 22px 0 0;
+        color: #62736b;
+        font-size: 16px;
+        line-height: 1.65;
+      }
+      .primary,
+      .secondary,
+      .icon-button,
+      .copy-button {
+        border: 0;
+        border-radius: 12px;
+        font-weight: 750;
+        transition:
+          transform 0.18s ease,
+          background 0.18s ease;
+      }
+      .primary {
+        padding: 15px 20px;
+        background: #b88635;
+        color: #fffdf7;
+        box-shadow: 0 10px 24px #8b652633;
+      }
+      .primary:hover {
+        transform: translateY(-2px);
+        background: #a9782c;
+      }
+      .secondary {
+        padding: 11px 15px;
+        background: #e8e3d7;
+        color: #28483d;
+      }
+      .secondary:hover {
+        background: #ded7c7;
+      }
+      .section {
+        border-top: 1px solid #d8d3c7;
+        padding-top: 24px;
+      }
+      .section-heading {
+        margin-bottom: 20px;
+      }
+      h2 {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 28px;
+        font-weight: 500;
+      }
+      .muted {
+        color: #78857e;
+        font-size: 13px;
+      }
+      .room-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 14px;
+      }
+      .room-card {
+        padding: 20px;
+        border: 1px solid #e0dbcf;
+        border-radius: 18px;
+        background: #fffdf8;
+        box-shadow: 0 8px 24px #253c2c08;
+      }
+      .room-heading {
+        align-items: flex-start;
+      }
+      .room-card h3 {
+        margin: 0 0 7px;
+        font-size: 17px;
+      }
+      .room-code {
+        color: #b07c29;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+      }
+      .room-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 18px;
+      }
+      .chip {
+        padding: 7px 9px;
+        border-radius: 999px;
+        background: #f1eee5;
+        color: #52635b;
+        font-size: 12px;
+      }
+      .room-join {
+        width: 100%;
+        margin-top: 18px;
+      }
+      .room-panel {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        margin: -24px 0 56px;
+        padding: 22px;
+        border: 1px solid #d8d3c7;
+        border-radius: 18px;
+        background: #fffdf8;
+        box-shadow: 0 12px 32px #253c2c0b;
+      }
+      .room-panel[hidden] {
+        display: none;
+      }
+      .room-panel h2 {
+        margin: 0;
+        font-size: 27px;
+      }
+      .room-panel p {
+        margin: 7px 0 0;
+        color: #718078;
+        font-size: 13px;
+      }
+      .room-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 9px;
+      }
+      .room-controls button[hidden] {
+        display: none;
+      }
+      .game-status {
+        flex-basis: 100%;
+        margin: 0;
+        color: #80591e;
+        font-size: 12px;
+      }
+      .notation-list {
+        display: grid;
+        gap: 8px;
+        max-height: 180px;
+        margin: 10px 0 0;
+        padding: 0;
+        overflow: auto;
+        list-style: none;
+      }
+      .notation-list li {
+        padding: 10px 12px;
+        border: 1px solid #e1dccf;
+        border-radius: 10px;
+        background: #f8f6ef;
+        font-size: 13px;
+      }
+      .room-error {
+        flex-basis: 100%;
+        margin: 0;
+        color: #a63e32;
+        font-size: 12px;
+        text-align: right;
+      }
+      .empty {
+        grid-column: 1 / -1;
+        padding: 30px;
+        border: 1px dashed #cfc9bb;
+        border-radius: 18px;
+        color: #718078;
+        text-align: center;
+      }
+      dialog {
+        width: min(590px, calc(100% - 28px));
+        max-height: min(90vh, 820px);
+        padding: 0;
+        overflow: auto;
+        border: 1px solid #e5dfd1;
+        border-radius: 24px;
+        background: #fffdf8;
+        color: #18312a;
+        box-shadow: 0 30px 90px #102b2555;
+      }
+      dialog::backdrop {
+        background: #0e211bcc;
+        backdrop-filter: blur(5px);
+      }
+      .dialog-body {
+        padding: 30px;
+      }
+      .modal-heading {
+        margin-bottom: 26px;
+      }
+      .modal-heading h2 {
+        font-size: 32px;
+      }
+      .modal-heading p {
+        margin: 8px 0 0;
+        color: #718078;
+        font-size: 14px;
+      }
+      .icon-button {
+        width: 38px;
+        height: 38px;
+        background: #f0ede4;
+        color: #445b51;
+        font-size: 21px;
+      }
+      .field {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 18px;
+      }
+      .field > span,
+      legend {
+        color: #334c42;
+        font-size: 13px;
+        font-weight: 750;
+      }
+      .field input[type="text"],
+      .field input[type="password"] {
+        width: 100%;
+        min-height: 47px;
+        padding: 0 13px;
+        border: 1px solid #dcd7cb;
+        border-radius: 11px;
+        outline: 0;
+        background: #fff;
+        color: #18312a;
+      }
+      .field input:focus {
+        border-color: #b88635;
+        box-shadow: 0 0 0 3px #b8863522;
+      }
+      .helper {
+        color: #78857e;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      fieldset {
+        margin: 0 0 19px;
+        padding: 0;
+        border: 0;
+      }
+      .choice-row {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 9px;
+        margin-top: 10px;
+      }
+      .choice-row.two {
+        grid-template-columns: repeat(2, 1fr);
+      }
+      .choice {
+        position: relative;
+      }
+      .choice input {
+        position: absolute;
+        opacity: 0;
+      }
+      .choice span {
+        display: grid;
+        min-height: 46px;
+        place-items: center;
+        border: 1px solid #dfdacd;
+        border-radius: 11px;
+        background: #fff;
+        color: #596b62;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .choice input:checked + span {
+        border-color: #b88635;
+        background: #f8f0df;
+        color: #80591e;
+        box-shadow: inset 0 0 0 1px #b88635;
+      }
+      .choice input:focus-visible + span {
+        outline: 3px solid #b8863566;
+        outline-offset: 2px;
+      }
+      .toggle-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 11px;
+        padding: 14px;
+        border: 1px solid #e2ddd1;
+        border-radius: 13px;
+        background: #faf8f1;
+      }
+      .toggle-row input {
+        width: 17px;
+        height: 17px;
+        margin: 2px 0 0;
+        accent-color: #a9782c;
+      }
+      .toggle-row strong {
+        display: block;
+        font-size: 13px;
+      }
+      .toggle-row small {
+        display: block;
+        margin-top: 4px;
+        color: #78857e;
+        font-size: 12px;
+        line-height: 1.4;
+      }
+      .form-error {
+        min-height: 20px;
+        margin: 0 0 12px;
+        color: #a63e32;
+        font-size: 13px;
+      }
+      .actions {
+        justify-content: flex-end;
+        margin-top: 24px;
+      }
+      .actions .primary {
+        min-width: 155px;
+      }
+      .result {
+        width: min(520px, calc(100% - 28px));
+      }
+      .result .dialog-body {
+        padding: 28px;
+      }
+      .result-label {
+        margin: 17px 0 6px;
+        color: #78857e;
+        font-size: 12px;
+        font-weight: 750;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .result-value {
+        overflow-wrap: anywhere;
+        padding: 12px;
+        border: 1px solid #e1dccf;
+        border-radius: 10px;
+        background: #f8f6ef;
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 13px;
+      }
+      .copy-button {
+        margin-top: 8px;
+        padding: 9px 12px;
+        background: #e8e3d7;
+        color: #28483d;
+        font-size: 12px;
+      }
+      .result .actions {
+        margin-top: 22px;
+      }
+      .toast {
+        position: fixed;
+        right: 24px;
+        bottom: 24px;
+        padding: 12px 16px;
+        border-radius: 12px;
+        background: #18312a;
+        color: white;
+        box-shadow: 0 12px 32px #102b2533;
+        opacity: 0;
+        transform: translateY(8px);
+        pointer-events: none;
+        transition: 0.2s;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
       @media (max-width: 650px) {
-        .page { width: min(100% - 28px, 520px); padding-top: 24px; }
-        .hero { grid-template-columns: 1fr; margin: 58px 0 42px; }
-        .hero .primary { width: 100%; }
-        .room-panel { align-items: stretch; flex-direction: column; margin-top: -8px; }
-        .room-controls { align-items: stretch; flex-direction: column; }
-        .room-error { text-align: left; }
-        .dialog-body { padding: 23px 19px; }
-        .topbar .muted { display: none; }
+        .page {
+          width: min(100% - 28px, 520px);
+          padding-top: 24px;
+        }
+        .hero {
+          grid-template-columns: 1fr;
+          margin: 58px 0 42px;
+        }
+        .hero .primary {
+          width: 100%;
+        }
+        .room-panel {
+          align-items: stretch;
+          flex-direction: column;
+          margin-top: -8px;
+        }
+        .room-controls {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        .room-error {
+          text-align: left;
+        }
+        .dialog-body {
+          padding: 23px 19px;
+        }
+        .topbar .muted {
+          display: none;
+        }
       }
     </style>
   </head>
   <body>
     <main class="page">
       <header class="topbar">
-        <div class="brand"><span class="brand-mark" aria-hidden="true">帥</span><span>CỜ TƯỚNG · PHÒNG ĐẤU</span></div>
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">帥</span><span>CỜ TƯỚNG · PHÒNG ĐẤU</span>
+        </div>
         <span class="muted">Tạo bàn cờ, mời đối thủ, bắt đầu ván đấu</span>
       </header>
 
@@ -116,22 +501,34 @@
         <div>
           <p class="eyebrow">Kỳ đài trực tuyến</p>
           <h1 id="page-title">Một ván cờ hay bắt đầu từ một căn phòng.</h1>
-          <p class="hero-copy">Tạo phòng công khai để tìm đối thủ hoặc mở bàn riêng cho bạn bè. Bạn có thể chọn thời gian mỗi nước đi và quyền xem trận đấu.</p>
+          <p class="hero-copy">
+            Tạo phòng công khai để tìm đối thủ hoặc mở bàn riêng cho bạn bè. Bạn có thể chọn thời
+            gian mỗi nước đi và quyền xem trận đấu.
+          </p>
         </div>
         <button class="primary" id="open-create" type="button">＋ Tạo phòng mới</button>
       </section>
 
       <section class="section" aria-labelledby="lobby-title">
         <div class="section-heading">
-          <div><p class="eyebrow">Sảnh chờ</p><h2 id="lobby-title">Phòng công khai</h2></div>
+          <div>
+            <p class="eyebrow">Sảnh chờ</p>
+            <h2 id="lobby-title">Phòng công khai</h2>
+          </div>
           <button class="secondary" id="refresh-rooms" type="button">Làm mới</button>
         </div>
-        <div class="room-list" id="room-list" aria-live="polite"><div class="empty">Đang tải danh sách phòng…</div></div>
+        <div class="room-list" id="room-list" aria-live="polite">
+          <div class="empty">Đang tải danh sách phòng…</div>
+        </div>
       </section>
     </main>
 
     <section class="page room-panel" id="room-panel" aria-live="polite" hidden>
-      <div><p class="eyebrow">Vai trò trong phòng</p><h2 id="room-panel-title"></h2><p id="room-panel-state"></p></div>
+      <div>
+        <p class="eyebrow">Vai trò trong phòng</p>
+        <h2 id="room-panel-title"></h2>
+        <p id="room-panel-state"></p>
+      </div>
       <div class="room-controls">
         <button class="secondary" id="room-ready" type="button" hidden>Sẵn sàng</button>
         <button class="primary" id="room-start" type="button" hidden disabled>Bắt đầu</button>
@@ -148,47 +545,134 @@
     <dialog id="create-dialog" aria-labelledby="create-title">
       <form class="dialog-body" id="create-form">
         <div class="modal-heading">
-          <div><p class="eyebrow">Thiết lập ván đấu</p><h2 id="create-title">Tạo phòng mới</h2><p>Chọn luật phòng trước khi mời người chơi.</p></div>
+          <div>
+            <p class="eyebrow">Thiết lập ván đấu</p>
+            <h2 id="create-title">Tạo phòng mới</h2>
+            <p>Chọn luật phòng trước khi mời người chơi.</p>
+          </div>
           <button class="icon-button" id="close-create" type="button" aria-label="Đóng">×</button>
         </div>
 
-        <label class="field"><span>Tên phòng</span><input name="room_name" type="text" maxlength="80" placeholder="Ví dụ: Kỳ đài cuối tuần" required autocomplete="off" /><small class="helper">Tên phòng hiển thị trong sảnh chờ nếu bạn chọn công khai.</small></label>
-        <label class="field"><span>Tên chủ phòng</span><input name="host_name" type="text" maxlength="80" placeholder="Khách" autocomplete="name" /></label>
+        <label class="field"
+          ><span>Tên phòng</span
+          ><input
+            name="room_name"
+            type="text"
+            maxlength="80"
+            placeholder="Ví dụ: Kỳ đài cuối tuần"
+            required
+            autocomplete="off"
+          /><small class="helper"
+            >Tên phòng hiển thị trong sảnh chờ nếu bạn chọn công khai.</small
+          ></label
+        >
+        <label class="field"
+          ><span>Tên chủ phòng</span
+          ><input
+            name="host_name"
+            type="text"
+            maxlength="80"
+            placeholder="Khách"
+            autocomplete="name"
+        /></label>
 
-        <fieldset><legend>Thời gian mỗi nước đi</legend><div class="choice-row">
-          <label class="choice"><input type="radio" name="time_per_move" value="15" /><span>15 giây</span></label>
-          <label class="choice"><input type="radio" name="time_per_move" value="30" checked /><span>30 giây</span></label>
-          <label class="choice"><input type="radio" name="time_per_move" value="60" /><span>60 giây</span></label>
-        </div></fieldset>
+        <fieldset>
+          <legend>Thời gian mỗi nước đi</legend>
+          <div class="choice-row">
+            <label class="choice"
+              ><input type="radio" name="time_per_move" value="15" /><span>15 giây</span></label
+            >
+            <label class="choice"
+              ><input type="radio" name="time_per_move" value="30" checked /><span
+                >30 giây</span
+              ></label
+            >
+            <label class="choice"
+              ><input type="radio" name="time_per_move" value="60" /><span>60 giây</span></label
+            >
+          </div>
+        </fieldset>
 
-        <fieldset><legend>Quyền truy cập</legend><div class="choice-row two">
-          <label class="choice"><input type="radio" name="is_public" value="true" checked /><span>Công khai</span></label>
-          <label class="choice"><input type="radio" name="is_public" value="false" /><span>Riêng tư</span></label>
-        </div></fieldset>
+        <fieldset>
+          <legend>Quyền truy cập</legend>
+          <div class="choice-row two">
+            <label class="choice"
+              ><input type="radio" name="is_public" value="true" checked /><span
+                >Công khai</span
+              ></label
+            >
+            <label class="choice"
+              ><input type="radio" name="is_public" value="false" /><span>Riêng tư</span></label
+            >
+          </div>
+        </fieldset>
 
-        <label class="field"><span>Mật khẩu phòng <span class="muted">· không bắt buộc</span></span><input name="password" type="password" maxlength="128" placeholder="Để trống nếu không cần" autocomplete="new-password" /><small class="helper">Phòng riêng không có mật khẩu chỉ vào được bằng link mời.</small></label>
+        <label class="field"
+          ><span>Mật khẩu phòng <span class="muted">· không bắt buộc</span></span
+          ><input
+            name="password"
+            type="password"
+            maxlength="128"
+            placeholder="Để trống nếu không cần"
+            autocomplete="new-password"
+          /><small class="helper"
+            >Phòng riêng không có mật khẩu chỉ vào được bằng link mời.</small
+          ></label
+        >
 
-        <label class="toggle-row"><input name="allow_spectators" type="checkbox" checked /><span><strong>Cho phép khán giả</strong><small>Khán giả có thể theo dõi nhưng không thể thực hiện nước đi.</small></span></label>
+        <label class="toggle-row"
+          ><input name="allow_spectators" type="checkbox" checked /><span
+            ><strong>Cho phép khán giả</strong
+            ><small>Khán giả có thể theo dõi nhưng không thể thực hiện nước đi.</small></span
+          ></label
+        >
 
         <p class="form-error" id="create-error" role="alert"></p>
-        <div class="actions"><button class="secondary" id="cancel-create" type="button">Hủy</button><button class="primary" id="submit-create" type="submit">Tạo phòng</button></div>
+        <div class="actions">
+          <button class="secondary" id="cancel-create" type="button">Hủy</button
+          ><button class="primary" id="submit-create" type="submit">Tạo phòng</button>
+        </div>
       </form>
     </dialog>
 
     <dialog class="result" id="result-dialog" aria-labelledby="result-title">
       <div class="dialog-body">
-        <div class="modal-heading"><div><p class="eyebrow">Đã sẵn sàng</p><h2 id="result-title">Phòng đã được tạo</h2><p>Lưu mã hoặc chia sẻ link mời với đối thủ.</p></div><button class="icon-button" id="close-result" type="button" aria-label="Đóng">×</button></div>
-        <p class="result-label">Mã phòng tự tăng</p><div class="result-value" id="created-id"></div>
-        <p class="result-label">Mã định danh duy nhất</p><div class="result-value" id="created-uuid"></div>
-        <p class="result-label">Link mời</p><div class="result-value" id="created-link"></div><button class="copy-button" data-copy="created-link" type="button">Sao chép link</button>
-        <p class="result-label">Mã chủ phòng · giữ riêng tư</p><div class="result-value" id="created-token"></div><button class="copy-button" data-copy="created-token" type="button">Sao chép mã chủ phòng</button>
-        <div class="actions"><button class="secondary" id="open-created-room" type="button">Mở phòng</button><button class="primary" id="done-result" type="button">Hoàn tất</button></div>
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Đã sẵn sàng</p>
+            <h2 id="result-title">Phòng đã được tạo</h2>
+            <p>Lưu mã hoặc chia sẻ link mời với đối thủ.</p>
+          </div>
+          <button class="icon-button" id="close-result" type="button" aria-label="Đóng">×</button>
+        </div>
+        <p class="result-label">Mã phòng tự tăng</p>
+        <div class="result-value" id="created-id"></div>
+        <p class="result-label">Mã định danh duy nhất</p>
+        <div class="result-value" id="created-uuid"></div>
+        <p class="result-label">Link mời</p>
+        <div class="result-value" id="created-link"></div>
+        <button class="copy-button" data-copy="created-link" type="button">Sao chép link</button>
+        <p class="result-label">Mã chủ phòng · giữ riêng tư</p>
+        <div class="result-value" id="created-token"></div>
+        <button class="copy-button" data-copy="created-token" type="button">
+          Sao chép mã chủ phòng
+        </button>
+        <div class="actions">
+          <button class="secondary" id="open-created-room" type="button">Mở phòng</button
+          ><button class="primary" id="done-result" type="button">Hoàn tất</button>
+        </div>
       </div>
     </dialog>
 
     <dialog class="result" id="game-over-dialog" aria-labelledby="game-over-title">
       <div class="dialog-body">
-        <div class="modal-heading"><div><p class="eyebrow">Kết quả ván đấu</p><h2 id="game-over-title">Ván đấu đã kết thúc</h2><p id="game-over-reason"></p></div></div>
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">Kết quả ván đấu</p>
+            <h2 id="game-over-title">Ván đấu đã kết thúc</h2>
+            <p id="game-over-reason"></p>
+          </div>
+        </div>
         <p class="result-label">Biên bản nước đi</p>
         <div class="result-value" id="game-over-notation">Chưa có nước đi.</div>
         <p class="result-label">Lịch sử phòng</p>
@@ -280,9 +764,12 @@
       }
 
       async function loadRooms() {
-        roomList.replaceChildren(Object.assign(document.createElement("div"), {
-          className: "empty", textContent: "Đang tải danh sách phòng…"
-        }));
+        roomList.replaceChildren(
+          Object.assign(document.createElement("div"), {
+            className: "empty",
+            textContent: "Đang tải danh sách phòng…",
+          }),
+        );
         try {
           const response = await fetch("/api/v1/rooms/");
           if (!response.ok) throw new Error("Không thể tải sảnh chờ.");
@@ -331,10 +818,12 @@
         offerDrawButton.hidden = !playing || !isPlayer;
         offerDrawButton.disabled = Boolean(offer);
         offerDrawButton.textContent = offer === activeRoomAccess.role ? "Đã cầu hòa" : "Cầu hòa";
-        acceptDrawButton.hidden = !playing || !isPlayer || !offer || offer === activeRoomAccess.role;
+        acceptDrawButton.hidden =
+          !playing || !isPlayer || !offer || offer === activeRoomAccess.role;
         declineDrawButton.hidden = acceptDrawButton.hidden;
         resignButton.hidden = !playing || !isPlayer;
-        leaveButton.textContent = activeRoomAccess.status === "finished" ? "Về sảnh chờ" : "Rời phòng";
+        leaveButton.textContent =
+          activeRoomAccess.status === "finished" ? "Về sảnh chờ" : "Rời phòng";
         gameStatus.textContent = !offer
           ? ""
           : offer === activeRoomAccess.role
@@ -353,17 +842,19 @@
       }
 
       function gameResultLabel(result) {
-        return ({
-          checkmate: "Chiếu bí",
-          stalemate: "Hết nước đi hợp lệ",
-          draw: "Hòa theo luật cờ",
-          perpetual_check_loss: "Thua do chiếu liên tục",
-          perpetual_chase_loss: "Thua do đuổi bắt liên tục",
-          timeout: "Hết giờ",
-          resignation: "Đầu hàng",
-          forfeit: "Rời trận",
-          agreement: "Hai bên đồng ý hòa",
-        })[result] || "Ván đấu đã kết thúc";
+        return (
+          {
+            checkmate: "Chiếu bí",
+            stalemate: "Hết nước đi hợp lệ",
+            draw: "Hòa theo luật cờ",
+            perpetual_check_loss: "Thua do chiếu liên tục",
+            perpetual_chase_loss: "Thua do đuổi bắt liên tục",
+            timeout: "Hết giờ",
+            resignation: "Đầu hàng",
+            forfeit: "Rời trận",
+            agreement: "Hai bên đồng ý hòa",
+          }[result] || "Ván đấu đã kết thúc"
+        );
       }
 
       async function loadMatchHistory() {
@@ -443,25 +934,33 @@
         activeRoomSocket = new WebSocket(socketUrl);
         activeRoomSocket.addEventListener("message", (message) => {
           let event;
-          try { event = JSON.parse(message.data); } catch { return; }
+          try {
+            event = JSON.parse(message.data);
+          } catch {
+            return;
+          }
           if (event.room) updateRoomPanel({ ...event.room, role: activeRoomAccess.role });
           if (event.type === "room.snapshot") {
             updateRoomPanel({ ...event.room, role: event.role });
             updateGameSnapshot(event.game);
-            if (event.game?.status === "finished") showGameOver({ type: "game_over", ...event.game, game: event.game });
+            if (event.game?.status === "finished")
+              showGameOver({ type: "game_over", ...event.game, game: event.game });
           }
           if (event.game && event.type !== "room.snapshot") updateGameSnapshot(event.game);
-          if (event.type === "error") roomError.textContent = event.reason || "Yêu cầu không hợp lệ.";
+          if (event.type === "error")
+            roomError.textContent = event.reason || "Yêu cầu không hợp lệ.";
           if (event.type === "room.closed") {
             roomPanelState.textContent = "Phòng đã đóng.";
             readyButton.hidden = true;
             startButton.hidden = true;
           }
-          if (["game_over", "game.timeout", "game.forfeit"].includes(event.type)) showGameOver(event);
+          if (["game_over", "game.timeout", "game.forfeit"].includes(event.type))
+            showGameOver(event);
           if (event.type === "draw_offered") {
-            gameStatus.textContent = event.role === activeRoomAccess.role
-              ? "Đang chờ đối thủ trả lời lời cầu hòa."
-              : "Đối thủ đang đề nghị hòa.";
+            gameStatus.textContent =
+              event.role === activeRoomAccess.role
+                ? "Đang chờ đối thủ trả lời lời cầu hòa."
+                : "Đối thủ đang đề nghị hòa.";
           }
           if (event.type === "draw_declined") gameStatus.textContent = "Đối thủ đã từ chối hòa.";
           if (event.type === "room.rematch_requested") {
@@ -476,11 +975,20 @@
           if (event.type === "room.rematch_started") {
             activeGameSnapshot = null;
             updateRoomPanel({ ...event.room, role: activeRoomAccess.role });
-            gameStatus.textContent = "Tái đấu đã sẵn sàng. Player 2 hãy sẵn sàng để chủ phòng bắt đầu.";
-            rematchStatus.textContent = "Tái đấu đã sẵn sàng. Player 2 cần sẵn sàng rồi chủ phòng có thể bắt đầu.";
+            gameStatus.textContent =
+              "Tái đấu đã sẵn sàng. Player 2 hãy sẵn sàng để chủ phòng bắt đầu.";
+            rematchStatus.textContent =
+              "Tái đấu đã sẵn sàng. Player 2 cần sẵn sàng rồi chủ phòng có thể bắt đầu.";
             gameOverDialog.close();
           }
-          if (["room.participant_joined", "player.ready", "room.started", "room.rematch_started"].includes(event.type)) {
+          if (
+            [
+              "room.participant_joined",
+              "player.ready",
+              "room.started",
+              "room.rematch_started",
+            ].includes(event.type)
+          ) {
             loadRooms();
           }
         });
@@ -503,14 +1011,22 @@
               socket.close();
               reject(new Error("Hết thời gian chờ phản hồi từ sảnh."));
             }, 10000);
-            socket.addEventListener("open", () => {
-              const request = { type: "join_room", room_id: roomId };
-              if (password !== null) request.password = password;
-              socket.send(JSON.stringify(request));
-            }, { once: true });
+            socket.addEventListener(
+              "open",
+              () => {
+                const request = { type: "join_room", room_id: roomId };
+                if (password !== null) request.password = password;
+                socket.send(JSON.stringify(request));
+              },
+              { once: true },
+            );
             socket.addEventListener("message", (message) => {
               let event;
-              try { event = JSON.parse(message.data); } catch { return; }
+              try {
+                event = JSON.parse(message.data);
+              } catch {
+                return;
+              }
               if (event.type === "room.joined") {
                 window.clearTimeout(timeout);
                 socket.close();
@@ -521,10 +1037,14 @@
                 reject(new Error(event.reason || "Không thể vào phòng."));
               }
             });
-            socket.addEventListener("error", () => {
-              window.clearTimeout(timeout);
-              reject(new Error("Không thể kết nối đến sảnh."));
-            }, { once: true });
+            socket.addEventListener(
+              "error",
+              () => {
+                window.clearTimeout(timeout);
+                reject(new Error("Không thể kết nối đến sảnh."));
+              },
+              { once: true },
+            );
           });
           openRoom(access);
           await loadRooms();
@@ -562,20 +1082,30 @@
       }
 
       readyButton.addEventListener("click", () => {
-        if (!activeRoomAccess || !activeRoomSocket || activeRoomSocket.readyState !== WebSocket.OPEN) {
+        if (
+          !activeRoomAccess ||
+          !activeRoomSocket ||
+          activeRoomSocket.readyState !== WebSocket.OPEN
+        ) {
           roomError.textContent = "Đang kết nối lại với phòng…";
           return;
         }
         roomError.textContent = "";
-        activeRoomSocket.send(JSON.stringify({
-          type: "ready",
-          ready: !activeRoomAccess.player2_ready,
-        }));
+        activeRoomSocket.send(
+          JSON.stringify({
+            type: "ready",
+            ready: !activeRoomAccess.player2_ready,
+          }),
+        );
       });
 
       offerDrawButton.addEventListener("click", () => sendRoomMessage({ type: "offer_draw" }));
-      acceptDrawButton.addEventListener("click", () => sendRoomMessage({ type: "respond_draw", accept: true }));
-      declineDrawButton.addEventListener("click", () => sendRoomMessage({ type: "respond_draw", accept: false }));
+      acceptDrawButton.addEventListener("click", () =>
+        sendRoomMessage({ type: "respond_draw", accept: true }),
+      );
+      declineDrawButton.addEventListener("click", () =>
+        sendRoomMessage({ type: "respond_draw", accept: false }),
+      );
       resignButton.addEventListener("click", () => {
         if (window.confirm("Bạn chắc chắn muốn đầu hàng ván này?")) {
           sendRoomMessage({ type: "resign" });
@@ -593,11 +1123,14 @@
         if (!activeRoomAccess || startButton.disabled) return;
         startButton.disabled = true;
         try {
-          const response = await fetch(`/api/v1/rooms/${activeRoomAccess.room_id || activeRoomAccess.id}/start`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ participant_token: activeRoomAccess.participant_token }),
-          });
+          const response = await fetch(
+            `/api/v1/rooms/${activeRoomAccess.room_id || activeRoomAccess.id}/start`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ participant_token: activeRoomAccess.participant_token }),
+            },
+          );
           const result = await response.json();
           if (!response.ok) throw new Error(result.detail || "Không thể bắt đầu ván đấu.");
           updateRoomPanel({ ...result, role: activeRoomAccess.role });
@@ -611,11 +1144,14 @@
       async function leaveCurrentRoom() {
         if (!activeRoomAccess) return;
         try {
-          const response = await fetch(`/api/v1/rooms/${activeRoomAccess.room_id || activeRoomAccess.id}/leave`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ participant_token: activeRoomAccess.participant_token }),
-          });
+          const response = await fetch(
+            `/api/v1/rooms/${activeRoomAccess.room_id || activeRoomAccess.id}/leave`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ participant_token: activeRoomAccess.participant_token }),
+            },
+          );
           const result = await response.json();
           if (!response.ok) throw new Error(result.detail || "Không thể rời phòng.");
           activeRoomSocket?.close();
@@ -657,7 +1193,11 @@
           const result = await response.json();
           if (!response.ok) {
             const detail = result.detail;
-            throw new Error(Array.isArray(detail) ? detail.map((item) => item.msg).join("; ") : detail || "Không thể tạo phòng.");
+            throw new Error(
+              Array.isArray(detail)
+                ? detail.map((item) => item.msg).join("; ")
+                : detail || "Không thể tạo phòng.",
+            );
           }
           createdRoomAccess = result;
           document.querySelector("#created-id").textContent = String(result.room_id || result.id);

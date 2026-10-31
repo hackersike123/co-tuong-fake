@@ -1,4 +1,4 @@
-import { Button } from "@figma/astraui"
+import { Button } from "@figma/astraui";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -16,7 +16,7 @@ import {
   TrendingUp,
   Trophy,
   Users,
-} from "lucide-react"
+} from "lucide-react";
 import {
   ChessBoard,
   Heading,
@@ -24,25 +24,17 @@ import {
   RoomCard,
   SectionTitle,
   UserAvatar,
-} from "../components"
-import { useApp } from "../context"
-import { gameHistory, getDemoRankings, playerInitials, resultLabels } from "../data"
-import { useExperience } from "../experience/Experience"
-import { RankBadge, RankProgress } from "../rank-ui"
-import { ArenaAtmosphere } from "../experience/effects"
+} from "../components";
+import { useApp } from "../context";
+import { gameHistory, getDemoRankings, playerInitials, resultLabels } from "../data";
+import { useExperience } from "../experience/Experience";
+import { RankBadge, RankProgress } from "../rank-ui";
+import { ArenaAtmosphere } from "../experience/effects";
 
 export default function Home() {
-  const { demoElo } = useExperience()
-  const topPlayers = getDemoRankings(demoElo).slice(0, 4)
-  const {
-    go,
-    username,
-    signedIn,
-    profileTone,
-    openModal,
-    roomList,
-    viewRecord,
-  } = useApp()
+  const { demoElo } = useExperience();
+  const topPlayers = getDemoRankings(demoElo).slice(0, 4);
+  const { go, username, signedIn, profileTone, openModal, roomList, viewRecord } = useApp();
   return (
     <div className="home-page page-stack">
       <ArenaAtmosphere />
@@ -76,21 +68,13 @@ export default function Home() {
               </Heading>
               <div className="hero-description">
                 Tìm một đối thủ xứng tầm, hay đơn giản
-                <br className="desktop-break" /> là tận hưởng một ván cờ thật
-                hay.
+                <br className="desktop-break" /> là tận hưởng một ván cờ thật hay.
               </div>
               <div className="hero-actions">
-                <Button
-                  iconEnd={<ArrowRight size={16} />}
-                  onClick={() => go("rooms")}
-                >
+                <Button iconEnd={<ArrowRight size={16} />} onClick={() => go("rooms")}>
                   Chơi ngay
                 </Button>
-                <Button
-                  variant="neutral"
-                  iconStart={<Bot size={17} />}
-                  onClick={() => go("ai")}
-                >
+                <Button variant="neutral" iconStart={<Bot size={17} />} onClick={() => go("ai")}>
                   Chơi với máy
                 </Button>
               </div>
@@ -100,9 +84,7 @@ export default function Home() {
                   <UserAvatar initials="KV" tone="sand" size="small" elo={2358} />
                   <UserAvatar initials="TP" tone="blue" size="small" elo={2082} />
                 </div>
-                <span>
-                  Sảnh cờ tướng cập nhật theo thời gian thực
-                </span>
+                <span>Sảnh cờ tướng cập nhật theo thời gian thực</span>
               </div>
             </div>
             <div className="hero-art" aria-hidden="true">
@@ -125,11 +107,7 @@ export default function Home() {
             </div>
           </section>
           <div className="quick-action-grid">
-            <Button
-              variant="neutral"
-              className="quick-action"
-              onClick={() => openModal("create")}
-            >
+            <Button variant="neutral" className="quick-action" onClick={() => openModal("create")}>
               <span className="quick-icon tone-rose">
                 <Plus size={22} strokeWidth={1.7} />
               </span>
@@ -139,11 +117,7 @@ export default function Home() {
               </span>
               <ChevronRight size={17} className="muted" />
             </Button>
-            <Button
-              variant="neutral"
-              className="quick-action"
-              onClick={() => go("rooms")}
-            >
+            <Button variant="neutral" className="quick-action" onClick={() => go("rooms")}>
               <span className="quick-icon tone-sage">
                 <Swords size={22} strokeWidth={1.7} />
               </span>
@@ -153,11 +127,7 @@ export default function Home() {
               </span>
               <ChevronRight size={17} className="muted" />
             </Button>
-            <Button
-              variant="neutral"
-              className="quick-action"
-              onClick={() => openModal("rules")}
-            >
+            <Button variant="neutral" className="quick-action" onClick={() => openModal("rules")}>
               <span className="quick-icon tone-sand">
                 <Sprout size={22} strokeWidth={1.7} />
               </span>
@@ -232,9 +202,7 @@ export default function Home() {
                         </td>
                         <td>
                           <span
-                            className={`elo-change ${
-                              game.change > 0 ? "positive" : "negative"
-                            }`}
+                            className={`elo-change ${game.change > 0 ? "positive" : "negative"}`}
                           >
                             {game.change > 0 ? "+" : ""}
                             {game.change} <span className="small">Elo</span>
@@ -289,9 +257,7 @@ export default function Home() {
                 current={signedIn}
               />
               <div>
-                <Heading level={3}>
-                  {signedIn ? username : "Kỳ hữu mới"}
-                </Heading>
+                <Heading level={3}>{signedIn ? username : "Kỳ hữu mới"}</Heading>
                 <div className="profile-level">
                   <span className="level-dot" />
                   {signedIn ? <RankBadge elo={demoElo} compact /> : "Sẵn sàng khai cuộc"}
@@ -320,15 +286,21 @@ export default function Home() {
               </span>
             </div>
             <RankProgress elo={signedIn ? demoElo : 1000} />
-            <Button variant="subtle" size="small" className="rank-roadmap-link" iconEnd={<ArrowRight size={13} />} onClick={() => openModal("ranks")}>Lộ trình 13 cảnh giới</Button>
+            <Button
+              variant="subtle"
+              size="small"
+              className="rank-roadmap-link"
+              iconEnd={<ArrowRight size={13} />}
+              onClick={() => openModal("ranks")}
+            >
+              Lộ trình 13 cảnh giới
+            </Button>
             <div className="summary-stats">
               <div>
                 <span className="stat-icon tone-blue">
                   <Flag size={17} />
                 </span>
-                <div className="summary-stat-value">
-                  {signedIn ? "48" : "0"}
-                </div>
+                <div className="summary-stat-value">{signedIn ? "48" : "0"}</div>
                 <span className="small muted">Trận đã chơi</span>
               </div>
               <div>
@@ -363,11 +335,7 @@ export default function Home() {
                   onClick={() => go("leaderboard")}
                 >
                   <span className={`rank-position position-${i}`}>
-                    {i === 0 ? (
-                      <Crown size={18} />
-                    ) : (
-                      String(i + 1).padStart(2, "0")
-                    )}
+                    {i === 0 ? <Crown size={18} /> : String(i + 1).padStart(2, "0")}
                   </span>
                   <UserAvatar
                     initials={player.initials}
@@ -377,7 +345,9 @@ export default function Home() {
                     current={player.username === "MinhAnh" && signedIn}
                   />
                   <span className="rank-player">
-                    <span>{player.username === "MinhAnh" && signedIn ? username : player.username}</span>
+                    <span>
+                      {player.username === "MinhAnh" && signedIn ? username : player.username}
+                    </span>
                     <RankBadge elo={player.elo} compact />
                   </span>
                   <span className="rank-elo">
@@ -422,9 +392,7 @@ export default function Home() {
             </span>
             <div>
               <span>Văn minh trên từng nước cờ</span>
-              <div className="muted small">
-                Tôn trọng đối thủ. Tận hưởng cuộc chơi.
-              </div>
+              <div className="muted small">Tôn trọng đối thủ. Tận hưởng cuộc chơi.</div>
             </div>
           </div>
         </aside>
@@ -434,5 +402,5 @@ export default function Home() {
         <span>Bản mẫu tương tác · Dữ liệu minh họa</span>
       </footer>
     </div>
-  )
+  );
 }

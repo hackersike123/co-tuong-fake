@@ -1,14 +1,14 @@
-import { useEffect, useRef } from "react"
-import { SwitchField } from "@figma/astraui"
+import { useEffect, useRef } from "react";
+import { SwitchField } from "@figma/astraui";
 
 type SettingSwitchProps = {
-  label: string
-  description: string
-  selected: boolean
-  onChange: (value: boolean) => void
-  disabled?: boolean
-  resetKey?: string
-}
+  label: string;
+  description: string;
+  selected: boolean;
+  onChange: (value: boolean) => void;
+  disabled?: boolean;
+  resetKey?: string;
+};
 
 /** Keep Astra's switch styling while adding its missing accessible state/label. */
 export function SettingSwitch({
@@ -19,25 +19,21 @@ export function SettingSwitch({
   disabled = false,
   resetKey = "",
 }: SettingSwitchProps) {
-  const root = useRef<HTMLDivElement>(null)
+  const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const button = root.current?.querySelector("button")
-    button?.setAttribute("role", "switch")
-    button?.setAttribute("aria-label", label)
-    button?.setAttribute("aria-checked", String(selected))
-    button?.setAttribute("type", "button")
-  }, [label, selected, resetKey])
+    const button = root.current?.querySelector("button");
+    button?.setAttribute("role", "switch");
+    button?.setAttribute("aria-label", label);
+    button?.setAttribute("aria-checked", String(selected));
+    button?.setAttribute("type", "button");
+  }, [label, selected, resetKey]);
   return (
     <div
       ref={root}
       className="setting-switch-adapter"
       onClick={(event) => {
-        if (
-          disabled ||
-          (event.target instanceof Element && event.target.closest("button"))
-        )
-          return
-        root.current?.querySelector("button")?.click()
+        if (disabled || (event.target instanceof Element && event.target.closest("button"))) return;
+        root.current?.querySelector("button")?.click();
       }}
     >
       <SwitchField
@@ -49,5 +45,5 @@ export function SettingSwitch({
         onChange={onChange}
       />
     </div>
-  )
+  );
 }

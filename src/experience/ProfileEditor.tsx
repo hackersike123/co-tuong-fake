@@ -1,27 +1,27 @@
-import { useEffect, useRef, useState, type FormEvent } from "react"
-import { Button, InputField } from "@figma/astraui"
-import { AlertCircle, Check, ShieldCheck, Upload } from "lucide-react"
-import { Dialog, UserAvatar } from "../components"
-import { useApp } from "../context"
-import { playerInitials } from "../data"
-import { useExperience } from "./Experience"
-import { AvatarCropper } from "./AvatarCropper"
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Button, InputField } from "@figma/astraui";
+import { AlertCircle, Check, ShieldCheck, Upload } from "lucide-react";
+import { Dialog, UserAvatar } from "../components";
+import { useApp } from "../context";
+import { playerInitials } from "../data";
+import { useExperience } from "./Experience";
+import { AvatarCropper } from "./AvatarCropper";
 import {
   decodeAvatar,
   encodeAvatar,
   INITIAL_CROP,
   type AvatarCrop,
   type DecodedAvatar,
-} from "./avatar"
+} from "./avatar";
 import {
   normalizeProfileName,
   PROFILE_AVATARS,
   profileNameError,
   type ProfileTone,
-} from "./profile-store"
+} from "./profile-store";
 
 export function ProfileEditor({ onClose }: { onClose: () => void }) {
-  const { profileReady } = useExperience()
+  const { profileReady } = useExperience();
   if (!profileReady)
     return (
       <Dialog
@@ -42,120 +42,111 @@ export function ProfileEditor({ onClose }: { onClose: () => void }) {
           Đang đọc hồ sơ lưu cục bộ...
         </div>
       </Dialog>
-    )
-  return <ProfileEditorForm onClose={onClose} />
+    );
+  return <ProfileEditorForm onClose={onClose} />;
 }
 
 function ProfileEditorForm({ onClose }: { onClose: () => void }) {
-  const { notify } = useApp()
-  const { profile, demoElo, saveProfile, profileWarning } = useExperience()
-  const [name, setName] = useState(profile.name)
-  const [tone, setTone] = useState<ProfileTone>(profile.tone)
-  const [useUpload, setUseUpload] = useState(Boolean(profile.image))
-  const [sourceImage, setSourceImage] = useState<DecodedAvatar | null>(null)
-  const [newUpload, setNewUpload] = useState(false)
-  const [crop, setCrop] = useState<AvatarCrop>({ ...INITIAL_CROP })
-  const [pending, setPending] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [fileError, setFileError] = useState("")
-  const [saveError, setSaveError] = useState("")
-  const requestGeneration = useRef(0)
-  const picker = useRef<HTMLDivElement>(null)
+  const { notify } = useApp();
+  const { profile, demoElo, saveProfile, profileWarning } = useExperience();
+  const [name, setName] = useState(profile.name);
+  const [tone, setTone] = useState<ProfileTone>(profile.tone);
+  const [useUpload, setUseUpload] = useState(Boolean(profile.image));
+  const [sourceImage, setSourceImage] = useState<DecodedAvatar | null>(null);
+  const [newUpload, setNewUpload] = useState(false);
+  const [crop, setCrop] = useState<AvatarCrop>({ ...INITIAL_CROP });
+  const [pending, setPending] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [fileError, setFileError] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const requestGeneration = useRef(0);
+  const picker = useRef<HTMLDivElement>(null);
   useEffect(
     () => () => {
-      requestGeneration.current++
+      requestGeneration.current++;
     },
     [],
-  )
-  useEffect(() => () => sourceImage?.dispose(), [sourceImage])
+  );
+  useEffect(() => () => sourceImage?.dispose(), [sourceImage]);
 
-  const canonicalName = normalizeProfileName(name)
-  const nameError = profileNameError(name)
+  const canonicalName = normalizeProfileName(name);
+  const nameError = profileNameError(name);
   const cropChanged =
     crop.zoom !== INITIAL_CROP.zoom ||
     crop.rotation !== INITIAL_CROP.rotation ||
     crop.x !== INITIAL_CROP.x ||
-    crop.y !== INITIAL_CROP.y
+    crop.y !== INITIAL_CROP.y;
   const changed =
     canonicalName !== profile.name ||
     tone !== profile.tone ||
     useUpload !== Boolean(profile.image) ||
-    (useUpload && (newUpload || cropChanged))
-  const valid =
-    !nameError &&
-    !fileError &&
-    (!useUpload || Boolean(sourceImage || profile.image))
-  const canSave = changed && valid && !pending && !saving
+    (useUpload && (newUpload || cropChanged));
+  const valid = !nameError && !fileError && (!useUpload || Boolean(sourceImage || profile.image));
+  const canSave = changed && valid && !pending && !saving;
 
   function selectPreset(value: ProfileTone) {
-    requestGeneration.current++
-    setTone(value)
-    setUseUpload(false)
-    setSourceImage(null)
-    setNewUpload(false)
-    setCrop({ ...INITIAL_CROP })
-    setPending(false)
-    setFileError("")
-    setSaveError("")
+    requestGeneration.current++;
+    setTone(value);
+    setUseUpload(false);
+    setSourceImage(null);
+    setNewUpload(false);
+    setCrop({ ...INITIAL_CROP });
+    setPending(false);
+    setFileError("");
+    setSaveError("");
   }
 
   async function selectFile(file: File, isNew = true) {
-    const generation = ++requestGeneration.current
-    setPending(true)
-    setFileError("")
-    setSaveError("")
+    const generation = ++requestGeneration.current;
+    setPending(true);
+    setFileError("");
+    setSaveError("");
     try {
-      const decoded = await decodeAvatar(file)
+      const decoded = await decodeAvatar(file);
       if (generation !== requestGeneration.current) {
-        decoded.dispose()
-        return
+        decoded.dispose();
+        return;
       }
-      setSourceImage(decoded)
-      setCrop({ ...INITIAL_CROP })
-      setNewUpload(isNew)
-      setUseUpload(true)
+      setSourceImage(decoded);
+      setCrop({ ...INITIAL_CROP });
+      setNewUpload(isNew);
+      setUseUpload(true);
     } catch (error) {
       if (generation === requestGeneration.current)
-        setFileError(
-          error instanceof Error ? error.message : "Ảnh chưa hợp lệ.",
-        )
+        setFileError(error instanceof Error ? error.message : "Ảnh chưa hợp lệ.");
     } finally {
-      if (generation === requestGeneration.current) setPending(false)
+      if (generation === requestGeneration.current) setPending(false);
     }
   }
 
   async function submit(event: FormEvent) {
-    event.preventDefault()
-    if (!canSave) return
-    setSaving(true)
-    setSaveError("")
+    event.preventDefault();
+    if (!canSave) return;
+    setSaving(true);
+    setSaveError("");
     try {
-      let image = useUpload ? profile.image : null
+      let image = useUpload ? profile.image : null;
       if (useUpload && sourceImage && (newUpload || cropChanged))
-        image = await encodeAvatar(sourceImage, crop)
-      const result = await saveProfile({ name: canonicalName, tone, image })
+        image = await encodeAvatar(sourceImage, crop);
+      const result = await saveProfile({ name: canonicalName, tone, image });
       if (!result.ok) {
-        setSaveError(result.error || "Chưa thể lưu hồ sơ.")
-        return
+        setSaveError(result.error || "Chưa thể lưu hồ sơ.");
+        return;
       }
-      notify(
-        "Đã lưu tên và ảnh đại diện cục bộ trên trình duyệt. Không gửi lên máy chủ.",
-      )
-      onClose()
+      notify("Đã lưu tên và ảnh đại diện cục bộ trên trình duyệt. Không gửi lên máy chủ.");
+      onClose();
     } catch (error) {
       setSaveError(
-        error instanceof Error
-          ? error.message
-          : "Không thể xử lý ảnh. Vui lòng thử lại.",
-      )
+        error instanceof Error ? error.message : "Không thể xử lý ảnh. Vui lòng thử lại.",
+      );
     } finally {
-      setSaving(false)
+      setSaving(false);
     }
   }
 
   const close = () => {
-    if (!saving) onClose()
-  }
+    if (!saving) onClose();
+  };
   return (
     <Dialog
       isOpen
@@ -165,12 +156,7 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
       className="profile-editor-dialog"
       footer={
         <>
-          <Button
-            type="button"
-            variant="neutral"
-            onClick={close}
-            disabled={saving}
-          >
+          <Button type="button" variant="neutral" onClick={close} disabled={saving}>
             Hủy
           </Button>
           <Button
@@ -193,8 +179,8 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
         <div className="profile-local-note">
           <ShieldCheck size={18} />
           <span>
-            Hồ sơ demo chỉ lưu trên trình duyệt này. Chọn ảnh, căn chỉnh và đổi
-            tên trước khi lưu một lần.
+            Hồ sơ demo chỉ lưu trên trình duyệt này. Chọn ảnh, căn chỉnh và đổi tên trước khi lưu
+            một lần.
           </span>
         </div>
         {profileWarning && (
@@ -202,14 +188,11 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
             {profileWarning}
           </div>
         )}
-        <section
-          className="profile-avatar-section"
-          aria-label="Chọn ảnh đại diện"
-        >
+        <section className="profile-avatar-section" aria-label="Chọn ảnh đại diện">
           <div className="form-label">Avatar có sẵn</div>
           <div className="avatar-options profile-preset-options">
             {PROFILE_AVATARS.map((option) => {
-              const selected = !useUpload && tone === option.tone
+              const selected = !useUpload && tone === option.tone;
               return (
                 <Button
                   type="button"
@@ -234,7 +217,7 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
                     </span>
                   )}
                 </Button>
-              )
+              );
             })}
           </div>
           <div ref={picker} className="profile-upload-control">
@@ -244,9 +227,7 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
               iconStart={<Upload size={16} />}
               disabled={pending || saving}
               onClick={() =>
-                picker.current
-                  ?.querySelector<HTMLInputElement>('input[type="file"]')
-                  ?.click()
+                picker.current?.querySelector<HTMLInputElement>('input[type="file"]')?.click()
               }
             >
               Chọn ảnh từ thiết bị
@@ -257,26 +238,20 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
               accept="image/jpeg,image/png,image/webp"
               tabIndex={-1}
               aria-label="Chọn ảnh đại diện từ thiết bị"
-              aria-describedby={
-                fileError ? "profile-file-error" : "profile-file-help"
-              }
+              aria-describedby={fileError ? "profile-file-error" : "profile-file-help"}
               aria-invalid={Boolean(fileError)}
               disabled={pending || saving}
               onInput={(event) => {
-                const file = event.currentTarget.files?.[0]
-                if (file) void selectFile(file)
-                event.currentTarget.value = ""
+                const file = event.currentTarget.files?.[0];
+                if (file) void selectFile(file);
+                event.currentTarget.value = "";
               }}
             />
             <span id="profile-file-help" className="tiny muted">
               JPG, PNG hoặc WebP · tối đa 5 MB · không tải lên máy chủ
             </span>
             {fileError && (
-              <div
-                id="profile-file-error"
-                className="error-message"
-                role="alert"
-              >
+              <div id="profile-file-error" className="error-message" role="alert">
                 <AlertCircle size={16} />
                 {fileError}
               </div>
@@ -287,10 +262,7 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
               </span>
             )}
           </div>
-          <div
-            className="profile-avatar-preview"
-            aria-label="Xem trước avatar đang chọn"
-          >
+          <div className="profile-avatar-preview" aria-label="Xem trước avatar đang chọn">
             {sourceImage && useUpload ? (
               <AvatarCropper
                 image={sourceImage}
@@ -323,15 +295,14 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
               size="small"
               disabled={pending || saving}
               onClick={() => {
-                const image = profile.image!
-                const extension =
-                  image.type === "image/jpeg" ? "jpg" : image.type.split("/")[1]
+                const image = profile.image!;
+                const extension = image.type === "image/jpeg" ? "jpg" : image.type.split("/")[1];
                 void selectFile(
                   new File([image], `avatar.${extension}`, {
                     type: image.type,
                   }),
                   false,
-                )
+                );
               }}
             >
               Cắt/xoay ảnh đang dùng
@@ -354,9 +325,7 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
             label="Tên kỳ thủ"
             aria-label="Tên kỳ thủ"
             aria-invalid={Boolean(nameError)}
-            aria-describedby={
-              nameError ? "profile-name-error" : "profile-name-help"
-            }
+            aria-describedby={nameError ? "profile-name-error" : "profile-name-help"}
             value={name}
             onChange={setName}
             maxLength={24}
@@ -364,11 +333,7 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
             placeholder="Tên của bạn trên Kỳ Tiên Hội"
           />
           {nameError ? (
-            <div
-              id="profile-name-error"
-              className="error-message profile-field-error"
-              role="alert"
-            >
+            <div id="profile-name-error" className="error-message profile-field-error" role="alert">
               {nameError}
             </div>
           ) : (
@@ -378,8 +343,8 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
           )}
         </div>
         <span className="tiny muted">
-          Chọn “Hủy” để bỏ toàn bộ bản nháp. Kể cả xóa ảnh cũng chỉ áp dụng sau
-          khi chọn “Lưu thay đổi”.
+          Chọn “Hủy” để bỏ toàn bộ bản nháp. Kể cả xóa ảnh cũng chỉ áp dụng sau khi chọn “Lưu thay
+          đổi”.
         </span>
         {saveError && (
           <div className="error-message" role="alert">
@@ -389,5 +354,5 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
         )}
       </form>
     </Dialog>
-  )
+  );
 }

@@ -1,18 +1,18 @@
-import { useEffect, useRef, type Dispatch, type SetStateAction } from "react"
-import { Button, InputField } from "@figma/astraui"
-import { RotateCcw, RotateCw } from "lucide-react"
-import { useExperience } from "./Experience"
-import { getCultivationRank } from "../ranks"
+import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
+import { Button, InputField } from "@figma/astraui";
+import { RotateCcw, RotateCw } from "lucide-react";
+import { useExperience } from "./Experience";
+import { getCultivationRank } from "../ranks";
 import {
   cropGeometry,
   drawAvatar,
   INITIAL_CROP,
   type AvatarCrop,
   type DecodedAvatar,
-} from "./avatar"
+} from "./avatar";
 
-const PREVIEW_SIZE = 512
-const clamp = (value: number) => Math.max(-1, Math.min(1, value))
+const PREVIEW_SIZE = 512;
+const clamp = (value: number) => Math.max(-1, Math.min(1, value));
 
 /** Inline controls only: the profile form owns the draft and its save action. */
 export function AvatarCropper({
@@ -22,36 +22,32 @@ export function AvatarCropper({
   onError,
   disabled,
 }: {
-  image: DecodedAvatar
-  crop: AvatarCrop
-  onChange: Dispatch<SetStateAction<AvatarCrop>>
-  onError: (message: string) => void
-  disabled: boolean
+  image: DecodedAvatar;
+  crop: AvatarCrop;
+  onChange: Dispatch<SetStateAction<AvatarCrop>>;
+  onError: (message: string) => void;
+  disabled: boolean;
 }) {
-  const { demoElo } = useExperience()
-  const rank = getCultivationRank(demoElo)
-  const canvas = useRef<HTMLCanvasElement>(null)
+  const { demoElo } = useExperience();
+  const rank = getCultivationRank(demoElo);
+  const canvas = useRef<HTMLCanvasElement>(null);
   const drag = useRef<{
-    x: number
-    y: number
-    cropX: number
-    cropY: number
-  } | null>(null)
+    x: number;
+    y: number;
+    cropX: number;
+    cropY: number;
+  } | null>(null);
   useEffect(() => {
-    if (!canvas.current) return
+    if (!canvas.current) return;
     try {
-      drawAvatar(canvas.current, image, crop)
+      drawAvatar(canvas.current, image, crop);
     } catch (error) {
-      onError(
-        error instanceof Error ? error.message : "Chưa thể xem trước ảnh.",
-      )
+      onError(error instanceof Error ? error.message : "Chưa thể xem trước ảnh.");
     }
-  }, [image, crop, onError])
+  }, [image, crop, onError]);
   return (
     <div className="profile-crop-controls">
-      <div
-        className={`profile-crop-frame rank-framed cultivation-${rank.index}`}
-      >
+      <div className={`profile-crop-frame rank-framed cultivation-${rank.index}`}>
         <div className="avatar-crop-window">
           <canvas
             ref={canvas}
@@ -61,49 +57,41 @@ export function AvatarCropper({
             role="img"
             aria-label="Xem trước ảnh đại diện đã cắt và xoay"
             onPointerDown={(event) => {
-              if (disabled) return
+              if (disabled) return;
               drag.current = {
                 x: event.clientX,
                 y: event.clientY,
                 cropX: crop.x,
                 cropY: crop.y,
-              }
-              event.currentTarget.setPointerCapture(event.pointerId)
+              };
+              event.currentTarget.setPointerCapture(event.pointerId);
             }}
             onPointerMove={(event) => {
-              const origin = drag.current
-              if (!origin || disabled) return
-              const geometry = cropGeometry(image, crop, PREVIEW_SIZE)
-              const scale =
-                PREVIEW_SIZE / event.currentTarget.getBoundingClientRect().width
+              const origin = drag.current;
+              if (!origin || disabled) return;
+              const geometry = cropGeometry(image, crop, PREVIEW_SIZE);
+              const scale = PREVIEW_SIZE / event.currentTarget.getBoundingClientRect().width;
               onChange((previous) => ({
                 ...previous,
                 x: geometry.maxX
-                  ? clamp(
-                      origin.cropX +
-                        ((event.clientX - origin.x) * scale) / geometry.maxX,
-                    )
+                  ? clamp(origin.cropX + ((event.clientX - origin.x) * scale) / geometry.maxX)
                   : 0,
                 y: geometry.maxY
-                  ? clamp(
-                      origin.cropY +
-                        ((event.clientY - origin.y) * scale) / geometry.maxY,
-                    )
+                  ? clamp(origin.cropY + ((event.clientY - origin.y) * scale) / geometry.maxY)
                   : 0,
-              }))
+              }));
             }}
             onPointerUp={() => {
-              drag.current = null
+              drag.current = null;
             }}
             onPointerCancel={() => {
-              drag.current = null
+              drag.current = null;
             }}
           />
         </div>
       </div>
       <span className="tiny muted">
-        Kéo ảnh để căn vị trí. Khung cảnh giới nằm bên ngoài, không được ghép
-        vào ảnh lưu.
+        Kéo ảnh để căn vị trí. Khung cảnh giới nằm bên ngoài, không được ghép vào ảnh lưu.
       </span>
       <InputField
         label="Phóng to"
@@ -114,9 +102,7 @@ export function AvatarCropper({
         step=".05"
         value={String(crop.zoom)}
         disabled={disabled}
-        onChange={(value) =>
-          onChange((previous) => ({ ...previous, zoom: Number(value) }))
-        }
+        onChange={(value) => onChange((previous) => ({ ...previous, zoom: Number(value) }))}
       />
       <div className="avatar-position-fields">
         <InputField
@@ -127,9 +113,7 @@ export function AvatarCropper({
           max="100"
           value={String(Math.round(crop.x * 100))}
           disabled={disabled}
-          onChange={(value) =>
-            onChange((previous) => ({ ...previous, x: Number(value) / 100 }))
-          }
+          onChange={(value) => onChange((previous) => ({ ...previous, x: Number(value) / 100 }))}
         />
         <InputField
           label="Vị trí dọc"
@@ -139,9 +123,7 @@ export function AvatarCropper({
           max="100"
           value={String(Math.round(crop.y * 100))}
           disabled={disabled}
-          onChange={(value) =>
-            onChange((previous) => ({ ...previous, y: Number(value) / 100 }))
-          }
+          onChange={(value) => onChange((previous) => ({ ...previous, y: Number(value) / 100 }))}
         />
       </div>
       <div className="avatar-rotate-controls">
@@ -190,5 +172,5 @@ export function AvatarCropper({
         </Button>
       </div>
     </div>
-  )
+  );
 }
