@@ -1,4 +1,4 @@
-/** Product-specific demo thresholds, not an official Xiangqi rating standard. */
+/** Kỳ Tiên Hội's own cultivation tiers; these are not a Xiangqi rating standard. */
 export const CULTIVATION_RANKS = [
   { name: "Phàm Nhân", minElo: 0 },
   { name: "Luyện Khí", minElo: 1000 },
@@ -16,7 +16,22 @@ export const CULTIVATION_RANKS = [
 ] as const;
 
 export const CULTIVATION_LAYERS = 3;
-export const INITIAL_DEMO_ELO = 1250;
+export const INITIAL_ELO = 1000;
+
+export function resolveDisplayedElo({
+  current,
+  signedIn,
+  currentElo,
+  playerElo,
+}: {
+  current: boolean;
+  signedIn: boolean;
+  currentElo?: number | null;
+  playerElo?: number | null;
+}): number | null {
+  const rating = current ? (signedIn ? currentElo : null) : playerElo;
+  return typeof rating === "number" && Number.isFinite(rating) ? rating : null;
+}
 
 export function getCultivationRank(value: number) {
   const elo = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;

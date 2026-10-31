@@ -7,12 +7,13 @@ import fakeredis
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import database, email_verification, otp_store, room_store, security
+from app import database, email_verification, match_service, otp_store, room_store, security
 from app.database import Base
+from app.models import Match, User
 from app.routers import auth as auth_routes
 from app.routers import rooms as room_routes
 from app.routers.ws_api import router as ws_api_router
@@ -29,6 +30,7 @@ def websocket_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestClie
     Base.metadata.create_all(engine)
     test_sessions = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     monkeypatch.setattr(database, "SessionLocal", test_sessions)
+    monkeypatch.setattr(match_service, "SessionLocal", test_sessions)
 
     fake_redis = fakeredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(room_store, "redis_client", fake_redis)
@@ -213,6 +215,101 @@ def test_websocket_room_create_join_ready_start_and_authoritative_state(
         assert game["ok"] is True
         assert game["data"]["side_to_move"] == "w"
         assert game["data"]["version"] == 0
+
+
+def test_websocket_rooms_bind_verified_accounts_and_real_player_names(
+    websocket_client: tuple[TestClient, list[tuple[str, str]], list[tuple[str, str]]],
+) -> None:
+    client, verification_emails, _ = websocket_client
+
+    def register_and_login(websocket: Any, email: str, name: str) -> str:
+        registered = _request(
+            websocket,
+            f"register-{name}",
+            "auth.register",
+            {"email": email, "display_name": name, "password": "safe-test-password"},
+        )
+        assert registered["ok"] is True
+        _, code = verification_emails[-1]
+        verified = _request(
+            websocket,
+            f"verify-{name}",
+            "auth.verify_email",
+            {"email": email, "otp": code},
+        )
+        assert verified["ok"] is True
+        login = _request(
+            websocket,
+            f"login-{name}",
+            "auth.login",
+            {"identifier": email, "password": "safe-test-password"},
+        )
+        assert login["ok"] is True
+        return login["data"]["access_token"]
+
+    with client.websocket_connect("/api/v1/ws") as websocket:
+        host_token = register_and_login(websocket, "red@example.com", "Verified Red")
+        opponent_token = register_and_login(websocket, "black@example.com", "Verified Black")
+        created = _request(
+            websocket,
+            "create-auth-room",
+            "room.create",
+            {
+                "room_name": "Account room",
+                "host_name": "Spoofed name",
+                "auth_token": host_token,
+            },
+        )
+        assert created["ok"] is True
+        assert created["data"]["host_name"] == "Verified Red"
+
+        joined = _request(
+            websocket,
+            "join-auth-room",
+            "room.join",
+            {
+                "room_id": created["data"]["id"],
+                "participant_name": "Another spoofed name",
+                "auth_token": opponent_token,
+            },
+        )
+        assert joined["ok"] is True
+        assert joined["data"]["player2_name"] == "Verified Black"
+
+        room_id = created["data"]["id"]
+        identity = room_store.get_room_identity(room_id)
+        assert identity is not None
+        with database.SessionLocal() as session:
+            red = session.scalar(select(User).where(User.email == "red@example.com"))
+            black = session.scalar(select(User).where(User.email == "black@example.com"))
+            assert red is not None and black is not None
+            red_id, black_id = red.id, black.id
+
+        room_store.redis_client.hset(
+            f"room:{room_id}",
+            mapping={
+                "status": "finished",
+                "game_fen": "9/9/9/9/9/9/9/9/9/9 w - - 0 1",
+                "game_result": "checkmate",
+                "game_reason": "checkmate",
+                "game_winner": "w",
+                "game_round": 1,
+                "game_notation": "1. b9-a7",
+            },
+        )
+        saved = match_service.record_completed_match(room_id)
+        assert saved is not None
+        assert saved.red_player == "Verified Red"
+        assert saved.black_player == "Verified Black"
+        assert saved.red_user_id == red_id
+        assert saved.black_user_id == black_id
+        assert (saved.red_elo_change, saved.black_elo_change) == (16, -16)
+        match_service.record_completed_match(room_id)
+        with database.SessionLocal() as session:
+            assert session.get(User, red_id).elo == 1016
+            assert session.get(User, black_id).elo == 984
+            assert len(session.scalars(select(Match)).all()) == 1
+
 
 
 def test_websocket_pve_options_start_and_ai_move():

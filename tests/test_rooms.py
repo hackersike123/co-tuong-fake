@@ -167,6 +167,26 @@ def test_start_initializes_server_authoritative_board_and_clocks(
     assert game["status"] == "playing"
 
 
+def test_room_code_is_six_random_alphanumeric_characters_and_joins_case_insensitively(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+) -> None:
+    client, _ = rooms_client
+    first = client.post("/api/v1/rooms/", json={"room_name": "Code room one"}).json()
+    second = client.post("/api/v1/rooms/", json={"room_name": "Code room two"}).json()
+
+    first_code = first["room_code"]
+    second_code = second["room_code"]
+    assert len(first_code) == len(second_code) == 6
+    assert first_code.isalnum() and first_code == first_code.upper()
+    assert second_code.isalnum() and second_code == second_code.upper()
+    assert first_code != second_code
+
+    joined = client.post("/api/v1/rooms/join", json={"room_code": first_code.lower()})
+    assert joined.status_code == 200, joined.text
+    assert joined.json()["room_id"] == first["room_id"]
+    assert joined.json()["role"] == "player2"
+
+
 def test_make_move_is_server_validated_and_broadcast_to_room(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:
@@ -227,11 +247,7 @@ def test_room_chat_is_validated_and_broadcast_over_websocket(
     rooms_client: tuple[TestClient, fakeredis.FakeRedis],
 ) -> None:
     client, _ = rooms_client
-    host = client.post("/api/v1/rooms/", json={"room_name": "Chat room"}).json()
-    opponent = client.post(
-        f"/api/v1/rooms/{host['room_id']}/join",
-        json={},
-    ).json()
+    host, opponent = _create_started_room(client, "Chat room")
     host_path = (
         f"/api/v1/rooms/{host['room_id']}/ws"
         f"?participant_token={host['participant_token']}"
@@ -241,11 +257,14 @@ def test_room_chat_is_validated_and_broadcast_over_websocket(
         f"?participant_token={opponent['participant_token']}"
     )
 
-    with client.websocket_connect(host_path) as host_socket:
-        with client.websocket_connect(opponent_path) as opponent_socket:
+    with client.websocket_connect(opponent_path) as opponent_socket:
+        assert opponent_socket.receive_json()["type"] == "room.snapshot"
+        with client.websocket_connect(host_path) as host_socket:
             assert host_socket.receive_json()["type"] == "room.snapshot"
-            assert opponent_socket.receive_json()["type"] == "room.snapshot"
-
+            host_socket.send_json({"type": "make_move", "from": [9, 1], "to": [7, 0]})
+            host_move = _receive_socket_event(host_socket, "move_made")
+            opponent_move = _receive_socket_event(opponent_socket, "move_made")
+            assert host_move == opponent_move
             host_socket.send_json(
                 {"type": "chat_message", "sender_name": "Kỳ hữu Đỏ", "text": "Chào bạn!"}
             )
@@ -258,6 +277,65 @@ def test_room_chat_is_validated_and_broadcast_over_websocket(
             host_socket.send_json({"type": "chat_message", "text": "  "})
             error = _receive_socket_event(host_socket, "error")
             assert error["reason"] == "invalid_chat_payload"
+        with client.websocket_connect(host_path) as reconnected_socket:
+            snapshot = reconnected_socket.receive_json()
+            assert snapshot["type"] == "room.snapshot"
+            assert snapshot["game"]["notation"] == "1. b9-a7"
+            assert snapshot["chat_history"] == [host_message]
+
+
+def test_call_signaling_is_relayed_only_to_the_other_player(
+    rooms_client: tuple[TestClient, fakeredis.FakeRedis],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = rooms_client
+    configured_ice = [
+        {"urls": ["stun:stun.test:3478"]},
+        {
+            "urls": ["turn:turn.test:3478"],
+            "username": "test-user",
+            "credential": "test-only-credential",
+        },
+    ]
+    monkeypatch.setattr(room_routes, "get_rtc_ice_servers", lambda: configured_ice)
+    host, opponent = _create_started_room(client, "Call signaling")
+    spectator = client.post(f"/api/v1/rooms/{host['room_id']}/join", json={}).json()
+    paths = {
+        "host": f"/api/v1/rooms/{host['room_id']}/ws?participant_token={host['participant_token']}",
+        "opponent": f"/api/v1/rooms/{host['room_id']}/ws?participant_token={opponent['participant_token']}",
+        "spectator": f"/api/v1/rooms/{host['room_id']}/ws?participant_token={spectator['participant_token']}",
+    }
+
+    with client.websocket_connect(paths["host"]) as host_socket:
+        with client.websocket_connect(paths["opponent"]) as opponent_socket:
+            with client.websocket_connect(paths["spectator"]) as spectator_socket:
+                snapshots = [
+                    websocket.receive_json()
+                    for websocket in (host_socket, opponent_socket, spectator_socket)
+                ]
+                assert all(snapshot["type"] == "room.snapshot" for snapshot in snapshots)
+                assert snapshots[0]["rtc_ice_servers"] == configured_ice
+                assert snapshots[1]["rtc_ice_servers"] == configured_ice
+                assert snapshots[2]["rtc_ice_servers"] == []
+
+                host_socket.send_json(
+                    {"type": "call_signal", "action": "request", "mode": "video"}
+                )
+                host_socket.send_json({"type": "chat_message", "text": "hello"})
+
+                host_event = host_socket.receive_json()
+                assert host_event["type"] == "chat_message"
+                opponent_signal = _receive_socket_event(opponent_socket, "call_signal")
+                assert opponent_signal["action"] == "request"
+                assert opponent_signal["mode"] == "video"
+                assert opponent_signal["from_role"] == "player1"
+                assert opponent_socket.receive_json()["type"] == "chat_message"
+                assert spectator_socket.receive_json()["type"] == "chat_message"
+
+                spectator_socket.send_json(
+                    {"type": "call_signal", "action": "request", "mode": "audio"}
+                )
+                assert _receive_socket_event(spectator_socket, "error")["reason"] == "players_only"
 
 
 def test_resignation_saves_match_and_move_notation_once(
@@ -1283,10 +1361,10 @@ def test_host_can_email_a_room_invitation(
     assert response.status_code == 202
     result = response.json()
     assert result["email"] == "friend@example.com"
-    assert result["room_code"] == "1"
+    assert result["room_code"] == host["room_code"]
     assert result["join_url"] == host["join_url"]
     assert sent_messages == [
-        ("friend@example.com", "Email invite", "1", host["join_url"])
+        ("friend@example.com", "Email invite", host["room_code"], host["join_url"])
     ]
 
 

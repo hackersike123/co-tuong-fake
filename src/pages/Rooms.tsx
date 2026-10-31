@@ -18,10 +18,14 @@ import { playerInitials, type Room } from "../data";
 
 type ServerRoom = {
   id: number;
+  room_code?: string;
   room_id?: number;
   room_name?: string;
   name?: string;
   host_name?: string;
+  host_elo?: number | null;
+  player2_name?: string | null;
+  player2_elo?: number | null;
   is_public?: boolean;
   allow_spectators?: boolean;
   status?: string;
@@ -33,16 +37,19 @@ function mapRoom(source: ServerRoom): Room {
   const host = source.host_name || "Kỳ hữu";
   return {
     id: String(source.id ?? source.room_id ?? ""),
+    roomCode: source.room_code,
     name: source.room_name || source.name || "Phòng cờ tướng",
     host,
     initials: playerInitials(host),
-    elo: 1200,
+    elo: source.host_elo,
     seconds: source.timer_seconds || 30,
     players: source.player_count || 1,
     private: source.is_public === false,
     playing: source.status === "playing",
     spectators: source.allow_spectators !== false,
     tone: "sage",
+    player2Name: source.player2_name,
+    player2Elo: source.player2_elo,
   };
 }
 
@@ -107,7 +114,9 @@ export default function Rooms() {
   }, [setRoomList]);
   const filtered = roomList.filter(
     (room) =>
-      `${room.name} ${room.id} ${room.host}`.toLowerCase().includes(query.toLowerCase()) &&
+      `${room.name} ${room.roomCode || room.id} ${room.host}`
+        .toLowerCase()
+        .includes(query.toLowerCase()) &&
       (time === "all" || String(room.seconds) === time) &&
       (status === "all" || (status === "waiting" ? !room.playing : room.playing)),
   );
@@ -156,10 +165,17 @@ export default function Rooms() {
         >
           <InputField
             aria-label="Mã phòng"
-            placeholder="Nhập mã phòng, ví dụ 42"
+            placeholder="Nhập mã phòng, ví dụ A7K2Q9"
             value={code}
-            onChange={setCode}
-            maxLength={12}
+            onChange={(value) =>
+              setCode(
+                value
+                  .toUpperCase()
+                  .replace(/[^A-Z0-9]/g, "")
+                  .slice(0, 10),
+              )
+            }
+            maxLength={10}
             required
           />
           <Button variant="neutral" type="submit" iconEnd={<ArrowRight size={16} />}>

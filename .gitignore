@@ -11,6 +11,10 @@ __pycache__/
 *.db
 .env*
 !.env.example
+!.env.example.en
+!.env.local.example
+!.env.staging.example
+!.env.production.example
 *.tsbuildinfo
 *-debug.log*
 logs/

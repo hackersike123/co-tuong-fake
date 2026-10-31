@@ -43,7 +43,7 @@ from ..security import (
     hash_token,
     verify_password,
 )
-from ..settings import REFRESH_TOKEN_TTL_SECONDS
+from ..settings import AUTH_COOKIE_SECURE, REFRESH_TOKEN_TTL_SECONDS
 
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=REFRESH_TOKEN_TTL_SECONDS,
         httponly=True,
-        secure=True,
+        secure=AUTH_COOKIE_SECURE,
         samesite="lax",
         path=REFRESH_COOKIE_PATH,
     )
@@ -76,7 +76,7 @@ def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(
         key=REFRESH_COOKIE_NAME,
         httponly=True,
-        secure=True,
+        secure=AUTH_COOKIE_SECURE,
         samesite="lax",
         path=REFRESH_COOKIE_PATH,
     )

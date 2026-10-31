@@ -7,8 +7,10 @@ import { pieceSymbol, type PieceType } from "./chess/pieces";
 import { useApp } from "./context";
 import { useExperience } from "./experience/Experience";
 import { BoardYinYang } from "./experience/effects";
-import { getCultivationRank } from "./ranks";
+import { getCultivationRank, resolveDisplayedElo } from "./ranks";
 import { RankBadge } from "./rank-ui";
+import { intlLocale } from "./i18n-core";
+import { useLanguage } from "./i18n";
 
 export function PieceGlyph({ side, type }: { side: Side; type: PieceType }) {
   return (
@@ -92,7 +94,7 @@ export function UserAvatar({
   tone = "sage",
   size = "large",
   className = "",
-  elo = 1000,
+  elo,
   current = false,
   image: previewImage,
 }: {
@@ -100,12 +102,19 @@ export function UserAvatar({
   tone?: string;
   size?: "small" | "medium" | "large";
   className?: string;
-  elo?: number;
+  elo?: number | null;
   current?: boolean;
   image?: string | null;
 }) {
-  const { avatar, demoElo, profile } = useExperience();
-  const rank = getCultivationRank(current ? demoElo : elo);
+  const { avatar, profile } = useExperience();
+  const { signedIn, currentUser } = useApp();
+  const rating = resolveDisplayedElo({
+    current,
+    signedIn,
+    currentElo: currentUser?.elo,
+    playerElo: elo,
+  });
+  const rank = getCultivationRank(rating ?? 0);
   const image = previewImage !== undefined ? previewImage : current ? avatar : null;
   const displayInitials = current ? playerInitials(profile.name) : initials;
   const displayTone = current ? profile.tone : tone;
@@ -113,10 +122,14 @@ export function UserAvatar({
     <Avatar
       type={image ? "image" : "initial"}
       src={image || undefined}
-      alt={`${displayInitials} — ${rank.label}${image ? " — ảnh lưu cục bộ" : ""}`}
+      alt={`${displayInitials} — ${
+        rating == null ? "Chưa xếp hạng" : rank.label
+      }${image ? " — ảnh lưu cục bộ" : ""}`}
       initials={displayInitials}
       size={size}
-      className={`user-avatar rank-framed cultivation-${rank.index} tone-${displayTone} ${className}`}
+      className={`user-avatar ${
+        rating == null ? "" : `rank-framed cultivation-${rank.index}`
+      } tone-${displayTone} ${className}`}
     />
   );
 }
@@ -224,10 +237,16 @@ export function EmptyState({
 }
 
 export function RoomCard({ room, compact = false }: { room: Room; compact?: boolean }) {
-  const { joinRoom, signedIn } = useApp();
-  const { demoElo } = useExperience();
+  const { language } = useLanguage();
+  const locale = intlLocale(language);
+  const { joinRoom, signedIn, currentUser } = useApp();
   const current = signedIn && Boolean(room.ownedByMe);
-  const rating = current ? demoElo : room.elo;
+  const rating = resolveDisplayedElo({
+    current,
+    signedIn,
+    currentElo: currentUser?.elo,
+    playerElo: room.elo,
+  });
   return (
     <article className={`room-card ${compact ? "compact" : ""}`}>
       <div className="room-card-top">
@@ -259,14 +278,14 @@ export function RoomCard({ room, compact = false }: { room: Room; compact?: bool
         />
         <div>
           <div className="player-name">{room.host}</div>
-          <div className="small muted">{rating.toLocaleString("vi-VN")} Elo</div>
-          <RankBadge elo={rating} compact />
+          {rating != null && <div className="small muted">{rating.toLocaleString(locale)} Elo</div>}
+          {rating != null && <RankBadge elo={rating} compact />}
         </div>
       </div>
       <div className="room-card-bottom">
         <span className="room-occupancy">
           <Users size={15} />
-          {room.players}/2 <span className="room-code">#{room.id}</span>
+          {room.players}/2 <span className="room-code">#{room.roomCode || room.id}</span>
         </span>
         <Button
           variant={room.playing ? "subtle" : "neutral"}
@@ -424,7 +443,7 @@ export function PlayerStrip({
 }: {
   name: string;
   initials: string;
-  elo: number;
+  elo?: number | null;
   side: Side;
   active?: boolean;
   time?: string;
@@ -434,8 +453,15 @@ export function PlayerStrip({
   current?: boolean;
   winner?: boolean;
 }) {
-  const { demoElo } = useExperience();
-  const rating = current ? demoElo : elo;
+  const { language } = useLanguage();
+  const locale = intlLocale(language);
+  const { signedIn, currentUser } = useApp();
+  const rating = resolveDisplayedElo({
+    current,
+    signedIn,
+    currentElo: currentUser?.elo,
+    playerElo: elo,
+  });
   return (
     <div
       className={`player-strip ${active ? "player-active" : ""} ${winner ? "player-winner" : ""}`}
@@ -448,11 +474,11 @@ export function PlayerStrip({
         </div>
         <div className="small muted">
           <span className={`piece-dot ${side}`} />
-          Quân {side === "red" ? "Đỏ" : "Đen"}
+          {`Quân ${side === "red" ? "Đỏ" : "Đen"}`}
           <span className="meta-dot">·</span>
-          {rating.toLocaleString("vi-VN")} Elo
+          {rating == null ? "Chưa xếp hạng" : `${rating.toLocaleString(locale)} Elo`}
         </div>
-        <RankBadge elo={rating} compact />
+        {rating != null && <RankBadge elo={rating} compact />}
       </div>
       {waiting ? (
         <Badge label="Đang chờ" variant="secondary" />

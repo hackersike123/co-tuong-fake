@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Button,
   IconButton,
@@ -28,17 +28,27 @@ import {
   User,
   X,
 } from "lucide-react";
-import { Heading, OnlineStatus, UserAvatar } from "./components";
-import { AppContext, type GameConfig, type ModalName, type RoomAccess } from "./context";
+import { Heading, UserAvatar } from "./components";
 import {
-  gameHistory,
+  AppContext,
+  type GameConfig,
+  type ModalName,
+  type PlayerAccount,
+  type RoomAccess,
+} from "./context";
+import {
   playerInitials,
+  type CommunitySummary,
   type GameRecord,
   type Page,
+  type PlayerStats,
+  type RankedPlayer,
   type Room,
   type Side,
 } from "./data";
 import { WebSocketRpcClient } from "./services/socket";
+import { ApiError, apiFetch } from "./services/api";
+import { INITIAL_ELO } from "./ranks";
 import Home from "./pages/Home";
 import Rooms from "./pages/Rooms";
 import Auth from "./pages/Auth";
@@ -46,6 +56,8 @@ import { AISetup, Game, Replay, WaitingRoom } from "./pages/Play";
 import { History, Leaderboard, Profile } from "./pages/Community";
 import { GlobalDialogs } from "./dialogs";
 import { ExperienceProvider, useExperience } from "./experience/Experience";
+import { useLanguage } from "./i18n";
+import { intlLocale, translateText } from "./i18n-core";
 
 const slugs: Record<Page, string> = {
   home: "sanh-chinh",
@@ -98,16 +110,19 @@ function loadStoredRoomAccess(): RoomAccess | null {
 function roomViewFromAccess(access: RoomAccess): Room {
   return {
     id: String(access.id),
+    roomCode: access.room_code || String(access.id),
     name: access.room_name,
     host: access.host_name,
     initials: playerInitials(access.host_name),
-    elo: 1200,
+    elo: access.host_elo,
     seconds: access.timer_seconds,
     players: access.player_count,
     private: !access.is_public,
     playing: access.status === "playing",
     spectators: access.allow_spectators,
     tone: "sage",
+    player2Name: access.player2_name,
+    player2Elo: access.player2_elo,
   };
 }
 
@@ -123,7 +138,9 @@ export default function App() {
 
 function Application() {
   const { setTheme } = useTheme();
-  const { reducedMotion, settings, profile, setDemoName: setUsername } = useExperience();
+  const { language, toggleLanguage } = useLanguage();
+  const locale = intlLocale(language);
+  const { reducedMotion, settings, profile, setProfileName: setUsername, setElo } = useExperience();
   const username = profile.name;
   const profileTone = profile.tone;
   const socketRpc = useMemo(() => new WebSocketRpcClient(), []);
@@ -133,6 +150,12 @@ function Application() {
   const [page, setPage] = useState<Page>(pageFromHash);
   const [modal, setModal] = useState<ModalName>(null);
   const [signedIn, setSignedInState] = useState(Boolean(authToken));
+  const [currentUser, setCurrentUser] = useState<PlayerAccount | null>(null);
+  const [playerStats, setPlayerStats] = useState<PlayerStats | null>(null);
+  const [leaderboard, setLeaderboard] = useState<RankedPlayer[]>([]);
+  const [recentMatches, setRecentMatches] = useState<GameRecord[]>([]);
+  const [myMatches, setMyMatches] = useState<GameRecord[]>([]);
+  const [communitySummary, setCommunitySummary] = useState<CommunitySummary | null>(null);
   const [roomList, setRoomList] = useState<Room[]>([]);
   const [roomAccess, setRoomAccessState] = useState<RoomAccess | null>(loadStoredRoomAccess);
   const [activeRoom, setActiveRoom] = useState<Room>(() =>
@@ -143,7 +166,6 @@ function Application() {
           name: "Chưa chọn phòng",
           host: "Kỳ hữu",
           initials: "KH",
-          elo: 1200,
           seconds: 30,
           players: 0,
           spectators: true,
@@ -160,7 +182,7 @@ function Application() {
   });
   const [authFlow, setAuthFlow] = useState<"register" | "reset" | "activate">("register");
   const [authEmail, setAuthEmail] = useState("");
-  const [selectedRecord, setSelectedRecord] = useState(gameHistory[0]);
+  const [selectedRecord, setSelectedRecord] = useState<GameRecord | null>(null);
   const [notification, setNotification] = useState<{
     message: string;
     type: "success" | "error" | "info";
@@ -169,40 +191,113 @@ function Application() {
   const [mobileNav, setMobileNav] = useState(false);
   const [profileMenu, setProfileMenu] = useState(false);
   const [bellMenu, setBellMenu] = useState(false);
+  function rpcRequest<T>(event: string, data: Record<string, unknown> = {}, timeoutMs?: number) {
+    const payload =
+      authToken && !event.startsWith("auth.") ? { ...data, auth_token: authToken } : data;
+    return socketRpc.request<T>(event, payload, timeoutMs);
+  }
+  const refreshData = useCallback(async () => {
+    const [summaryResult, leaderboardResult, recentResult] = await Promise.allSettled([
+      apiFetch<CommunitySummary>("/api/v1/community/summary"),
+      apiFetch<RankedPlayer[]>("/api/v1/community/leaderboard"),
+      apiFetch<GameRecord[]>("/api/v1/community/recent-matches"),
+    ]);
+    if (summaryResult.status === "fulfilled") setCommunitySummary(summaryResult.value);
+    if (leaderboardResult.status === "fulfilled") setLeaderboard(leaderboardResult.value);
+    if (recentResult.status === "fulfilled") setRecentMatches(recentResult.value);
+
+    if (!authToken) {
+      try {
+        const refreshed = await apiFetch<{ access_token: string }>("/api/v1/auth/refresh", {
+          method: "POST",
+        });
+        if (refreshed.access_token) {
+          setAuthToken(refreshed.access_token);
+          return;
+        }
+      } catch {
+        // A guest has no refresh cookie; continue with public data.
+      }
+      setCurrentUser(null);
+      setPlayerStats(null);
+      setMyMatches([]);
+      setSignedInState(false);
+      setElo(INITIAL_ELO);
+      return;
+    }
+    try {
+      const [user, stats, matches] = await Promise.all([
+        apiFetch<PlayerAccount>("/api/v1/users/me", { token: authToken }),
+        apiFetch<PlayerStats>("/api/v1/users/me/stats", { token: authToken }),
+        apiFetch<GameRecord[]>("/api/v1/users/me/matches", {
+          token: authToken,
+        }),
+      ]);
+      setCurrentUser(user);
+      setPlayerStats(stats);
+      setMyMatches(matches);
+      setUsername(user.display_name);
+      setElo(user.elo);
+      setSignedInState(true);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        try {
+          const refreshed = await apiFetch<{ access_token: string }>("/api/v1/auth/refresh", {
+            method: "POST",
+          });
+          if (refreshed.access_token) {
+            setAuthToken(refreshed.access_token);
+            return;
+          }
+        } catch {
+          setAuthToken("");
+        }
+      }
+    }
+  }, [authToken, setElo, setUsername]);
+  useEffect(() => {
+    void refreshData();
+  }, [refreshData]);
   useEffect(() => {
     setTheme("light");
   }, []);
   useEffect(() => () => socketRpc.close(), [socketRpc]);
   useEffect(() => {
     let cancelled = false;
-    void socketRpc
-      .request<
-        Array<{
-          id: number;
-          room_name: string;
-          host_name: string;
-          timer_seconds: number;
-          player_count: number;
-          is_public: boolean;
-          allow_spectators: boolean;
-          status: string;
-        }>
-      >("room.list")
+    void rpcRequest<
+      Array<{
+        id: number;
+        room_code: string;
+        room_name: string;
+        host_name: string;
+        host_elo?: number | null;
+        player2_name?: string | null;
+        player2_elo?: number | null;
+        timer_seconds: number;
+        player_count: number;
+        is_public: boolean;
+        allow_spectators: boolean;
+        status: string;
+      }>
+    >("room.list")
       .then((rooms) => {
         if (cancelled) return;
         setRoomList(
           rooms.map((room) => ({
             id: String(room.id),
+            roomCode: room.room_code,
             name: room.room_name,
             host: room.host_name,
             initials: playerInitials(room.host_name),
-            elo: 1200,
+            elo: room.host_elo,
             seconds: room.timer_seconds as 15 | 30 | 60,
             players: room.player_count,
             private: !room.is_public,
             playing: room.status === "playing",
             spectators: room.allow_spectators,
             tone: "sage",
+            player2Name: room.player2_name,
+            player2Elo: room.player2_elo,
           })),
         );
       })
@@ -226,11 +321,11 @@ function Application() {
     if (!match) return;
     let cancelled = false;
     const inviteToken = new URLSearchParams(window.location.search).get("token");
-    void socketRpc
-      .request<RoomAccess>("room.join", {
-        room_id: Number(match[1]),
-        invite_token: inviteToken || undefined,
-      })
+    void rpcRequest<RoomAccess>("room.join", {
+      room_id: Number(match[1]),
+      invite_token: inviteToken || undefined,
+      participant_name: username,
+    })
       .then((access) => {
         if (!cancelled) acceptRoomAccess(access);
       })
@@ -251,10 +346,12 @@ function Application() {
     return () => clearTimeout(timer);
   }, [notification]);
   useEffect(() => {
-    document.title = `${pageNames[page]} · Kỳ Tiên Hội`;
+    document.title = `${translateText(pageNames[page], language)} · ${
+      language === "en" ? "Ky Tien Hoi" : "Kỳ Tiên Hội"
+    }`;
     setProfileMenu(false);
     setBellMenu(false);
-  }, [page]);
+  }, [page, language]);
   function go(next: Page) {
     setPage(next);
     setMobileNav(false);
@@ -271,7 +368,13 @@ function Application() {
     setAuthTokenState(token);
     setSignedInState(Boolean(token));
     if (token) sessionStorage.setItem("co-tuong-access-token", token);
-    else sessionStorage.removeItem("co-tuong-access-token");
+    else {
+      sessionStorage.removeItem("co-tuong-access-token");
+      setCurrentUser(null);
+      setPlayerStats(null);
+      setMyMatches([]);
+      setElo(INITIAL_ELO);
+    }
   }
   function setSignedIn(value: boolean) {
     setSignedInState(value);
@@ -308,8 +411,9 @@ function Application() {
       return;
     }
     try {
-      const access = await socketRpc.request<RoomAccess>("room.join", {
+      const access = await rpcRequest<RoomAccess>("room.join", {
         room_id: roomId,
+        participant_name: username,
         ...options,
       });
       acceptRoomAccess(access);
@@ -332,17 +436,19 @@ function Application() {
     if (!Number.isSafeInteger(roomId) || roomId <= 0) {
       throw new Error("Mã phòng không hợp lệ.");
     }
-    const access = await socketRpc.request<RoomAccess>("room.join", {
+    const access = await rpcRequest<RoomAccess>("room.join", {
       room_id: roomId,
       password,
+      participant_name: username,
     });
     acceptRoomAccess(access);
   }
   async function joinRoomByCode(code: string) {
-    const roomCode = code.trim().replace(/^KD/i, "");
+    const roomCode = code.trim().toUpperCase();
     try {
-      const access = await socketRpc.request<RoomAccess>("room.join_code", {
+      const access = await rpcRequest<RoomAccess>("room.join_code", {
         room_code: roomCode,
+        participant_name: username,
       });
       acceptRoomAccess(access);
     } catch (error) {
@@ -370,7 +476,12 @@ function Application() {
   }
   function roomForProfile(room: Room): Room {
     return room.ownedByMe
-      ? { ...room, host: username, initials: playerInitials(username), tone: profileTone }
+      ? {
+          ...room,
+          host: username,
+          initials: playerInitials(username),
+          tone: profileTone,
+        }
       : room;
   }
   const context = {
@@ -383,10 +494,17 @@ function Application() {
     },
     closeModal: () => setModal(null),
     notify,
-    request: <T,>(event: string, data: Record<string, unknown> = {}, timeoutMs?: number) =>
-      socketRpc.request<T>(event, data, timeoutMs),
+    request: rpcRequest,
     signedIn,
     setSignedIn,
+    currentUser,
+    setCurrentUser,
+    playerStats,
+    leaderboard,
+    recentMatches,
+    myMatches,
+    communitySummary,
+    refreshData,
     authToken,
     setAuthToken,
     username,
@@ -415,7 +533,7 @@ function Application() {
   const navItems = [
     { page: "home" as Page, label: "Sảnh chính", icon: HomeIcon },
     { page: "ai" as Page, label: "Chơi với máy", icon: Bot },
-    { page: "rooms" as Page, label: "Sảnh đấu", icon: Swords, count: "24" },
+    { page: "rooms" as Page, label: "Sảnh đấu", icon: Swords },
     { page: "leaderboard" as Page, label: "Bảng Phong Thần", icon: Trophy },
     { page: "history" as Page, label: "Lịch sử ván đấu", icon: HistoryIcon },
     { page: "profile" as Page, label: "Hồ sơ của tôi", icon: User },
@@ -443,7 +561,7 @@ function Application() {
       case "history":
         return <History />;
       case "replay":
-        return <Replay key={selectedRecord.id} />;
+        return <Replay key={selectedRecord?.id ?? "missing-record"} />;
       case "leaderboard":
         return <Leaderboard />;
       case "profile":
@@ -473,7 +591,7 @@ function Application() {
               <span className="brand-name">
                 Kỳ Tiên Hội<span className="brand-name-dot">.</span>
               </span>
-              <span className="brand-tagline">CỜ TƯỚNG · BẢN DEMO</span>
+              <span className="brand-tagline">CỜ TƯỚNG TRỰC TUYẾN</span>
             </span>
           </Button>
           <SidebarNavigation
@@ -514,7 +632,7 @@ function Application() {
             }
           >
             <div className="nav-section-label">KHÔNG GIAN CỦA BẠN</div>
-            {navItems.map(({ page: target, label, icon: Icon, count }, i) => (
+            {navItems.map(({ page: target, label, icon: Icon }, i) => (
               <div key={target} className="nav-item-wrap">
                 {i === 3 && (
                   <div className="nav-section-label secondary-label">CỘNG ĐỒNG KỲ THỦ</div>
@@ -524,7 +642,6 @@ function Application() {
                     <span className="nav-item-content">
                       <Icon size={19} strokeWidth={1.7} />
                       <span>{label}</span>
-                      {count && <span className="nav-count">{count}</span>}
                     </span>
                   }
                   active={activeNav === target}
@@ -554,15 +671,30 @@ function Application() {
                 {page === "home" && (
                   <>
                     <span className="breadcrumb-divider" />
-                    <span className="breadcrumb-welcome">Chào mừng trở lại!</span>
+                    <span className="breadcrumb-welcome">
+                      {signedIn ? "Chào mừng trở lại!" : "Bàn cờ luôn mở."}
+                    </span>
                   </>
                 )}
               </div>
             </div>
             <div className="topbar-end">
-              <OnlineStatus muted>
-                <strong>1.248</strong> kỳ hữu · demo
-              </OnlineStatus>
+              <span className="small muted">
+                <strong>
+                  {communitySummary?.registered_players.toLocaleString(locale) ?? "—"}
+                </strong>{" "}
+                tài khoản
+              </span>
+              <Button
+                variant="subtle"
+                size="small"
+                className="language-switch-button"
+                aria-label={language === "vi" ? "Chuyển sang tiếng Anh" : "Chuyển sang tiếng Việt"}
+                title={language === "vi" ? "Chuyển sang tiếng Anh" : "Chuyển sang tiếng Việt"}
+                onClick={toggleLanguage}
+              >
+                {language === "vi" ? "EN" : "VI"}
+              </Button>
               <span className="topbar-divider" />
               <div className="popover-anchor">
                 <IconButton
@@ -575,36 +707,11 @@ function Application() {
                     setProfileMenu(false);
                   }}
                 />
-                <span className="bell-dot" />
                 {bellMenu && (
                   <div className="header-popover notification-popover">
                     <Heading level={3}>Thông báo</Heading>
-                    <div className="notification-item">
-                      <span className="quick-icon tone-sage">
-                        <ShieldCheck size={19} />
-                      </span>
-                      <div>
-                        <div className="player-name">Chào mừng đến với Kỳ Tiên Hội</div>
-                        <div className="muted small">Một cộng đồng văn minh, một niềm đam mê.</div>
-                      </div>
-                    </div>
-                    <div className="notification-item">
-                      <span className="quick-icon tone-sand">
-                        <Swords size={19} />
-                      </span>
-                      <div>
-                        <div className="player-name">Sẵn sàng khai cuộc?</div>
-                        <div className="muted small">Có 24 bàn cờ mẫu để trải nghiệm.</div>
-                        <Button
-                          variant="subtle"
-                          size="small"
-                          className="text-link"
-                          onClick={() => go("rooms")}
-                        >
-                          Khám phá sảnh đấu
-                          <ArrowRight size={13} />
-                        </Button>
-                      </div>
+                    <div className="notification-item muted small">
+                      Chưa có hệ thống thông báo trên máy chủ.
                     </div>
                   </div>
                 )}
@@ -661,6 +768,9 @@ function Application() {
                         variant="subtle"
                         iconStart={<LogOut size={16} />}
                         onClick={() => {
+                          void apiFetch("/api/v1/auth/logout", {
+                            method: "POST",
+                          }).catch(() => undefined);
                           setSignedIn(false);
                           setProfileMenu(false);
                           go("home");

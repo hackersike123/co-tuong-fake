@@ -38,7 +38,10 @@ from ..room_schemas import (
 from ..room_store import (
     create_room,
     apply_game_move,
+    append_chat_message,
+    get_chat_history,
     get_participant_role,
+    get_room_id_by_code,
     get_room,
     get_room_password_hash,
     get_game_snapshot,
@@ -57,7 +60,7 @@ from ..room_store import (
     request_rematch,
 )
 from ..security import hash_password, verify_password
-from ..settings import PUBLIC_APP_URL
+from ..settings import PUBLIC_APP_URL, get_rtc_ice_servers
 from ..xiangqi import (
     GameStatus,
     Move,
@@ -209,6 +212,69 @@ def _process_offer_draw(
     if game is None:
         return {"type": "error", "reason": "game_not_playing"}
     return {"type": "draw_offered", "room_id": room_id, "role": role, "game": game}
+
+
+def _call_signal_event(role: str, message: dict[str, Any]) -> dict[str, Any]:
+    """Validate and target one-to-one WebRTC signaling between room players."""
+    if role not in {"player1", "player2"}:
+        return {"type": "error", "reason": "players_only"}
+
+    action = message.get("action")
+    if not isinstance(action, str) or action not in {
+        "request",
+        "accept",
+        "reject",
+        "cancel",
+        "end",
+        "offer",
+        "answer",
+        "ice",
+    }:
+        return {"type": "error", "reason": "invalid_call_signal"}
+
+    event: dict[str, Any] = {
+        "type": "call_signal",
+        "action": action,
+        "from_role": role,
+        "_target_role": "player2" if role == "player1" else "player1",
+    }
+    if action == "request":
+        mode = message.get("mode")
+        if not isinstance(mode, str) or mode not in {"audio", "video"}:
+            return {"type": "error", "reason": "invalid_call_mode"}
+        event["mode"] = mode
+    elif action in {"offer", "answer"}:
+        raw_description = message.get("payload")
+        if not isinstance(raw_description, dict):
+            return {"type": "error", "reason": "invalid_call_signal"}
+        sdp = raw_description.get("sdp")
+        if raw_description.get("type") != action or not isinstance(sdp, str) or not sdp or len(sdp) > 16_000:
+            return {"type": "error", "reason": "invalid_call_signal"}
+        event["payload"] = {"type": action, "sdp": sdp}
+    elif action == "ice":
+        raw_candidate = message.get("payload")
+        if not isinstance(raw_candidate, dict):
+            return {"type": "error", "reason": "invalid_call_signal"}
+        candidate = raw_candidate.get("candidate")
+        mid = raw_candidate.get("sdpMid")
+        line_index = raw_candidate.get("sdpMLineIndex")
+        username_fragment = raw_candidate.get("usernameFragment")
+        if (
+            not isinstance(candidate, str)
+            or not candidate
+            or len(candidate) > 2_000
+            or (mid is not None and (not isinstance(mid, str) or len(mid) > 128))
+            or (line_index is not None and (isinstance(line_index, bool) or not isinstance(line_index, int)))
+            or (username_fragment is not None and (not isinstance(username_fragment, str) or len(username_fragment) > 256))
+        ):
+            return {"type": "error", "reason": "invalid_call_signal"}
+        event["payload"] = {
+            "candidate": candidate,
+            "sdpMid": mid,
+            "sdpMLineIndex": line_index,
+            "usernameFragment": username_fragment,
+        }
+    return event
 
 
 def _process_draw_response(
@@ -383,15 +449,30 @@ def create_public_room(
     background_tasks: BackgroundTasks,
 ) -> RoomAccessResponse:
     """Create a room and assign its creator player one."""
+    return create_public_room_with_identity(payload, background_tasks)
+
+
+def create_public_room_with_identity(
+    payload: RoomCreateRequest,
+    background_tasks: BackgroundTasks,
+    *,
+    user_id: int | None = None,
+    display_name: str | None = None,
+    elo: int | None = None,
+) -> RoomAccessResponse:
+    """Create a room with a display name and account ID supplied by auth validation."""
+    host_name = display_name or payload.host_name
     password_hash = hash_password(payload.password) if payload.password is not None else None
     try:
         room, host_token = create_room(
             payload.room_name,
-            payload.host_name,
+            host_name,
             payload.time_per_move,
             is_public=payload.is_public,
             password_hash=password_hash,
             allow_spectators=payload.allow_spectators,
+            host_user_id=user_id,
+            host_elo=elo,
         )
     except RedisError as exc:
         logger.exception("Could not create a room in Redis")
@@ -424,6 +505,10 @@ def _join_room_response(
     room_id: int,
     payload: RoomJoinRequest,
     background_tasks: BackgroundTasks,
+    *,
+    user_id: int | None = None,
+    display_name: str | None = None,
+    elo: int | None = None,
 ) -> RoomAccessResponse:
     room = _room_summary(room_id)
     if room is None:
@@ -475,7 +560,13 @@ def _join_room_response(
 
     participant_token = payload.participant_token or secrets.token_urlsafe(32)
     try:
-        role = join_room(room_id, participant_token)
+        role = join_room(
+            room_id,
+            participant_token,
+            participant_name=display_name or payload.participant_name,
+            user_id=user_id,
+            elo=elo,
+        )
     except RedisError as exc:
         logger.exception("Could not join room %s in Redis", room_id)
         raise _service_unavailable() from exc
@@ -508,21 +599,44 @@ def _join_room_response(
 @router.post(
     "/join",
     response_model=RoomAccessResponse,
-    summary="Join a room using its numeric room code",
+    summary="Join a room using its six-character room code",
 )
 def join_room_by_code(
     payload: RoomCodeJoinRequest,
     background_tasks: BackgroundTasks,
 ) -> RoomAccessResponse:
-    """Resolve a lobby-entered room code and join that public room."""
-    return _join_room_response(
-        int(payload.room_code),
-        RoomJoinRequest(
-            participant_token=payload.participant_token,
-            invite_token=payload.invite_token,
-            password=payload.password,
-        ),
+    """Resolve a lobby-entered room code and join that room."""
+    return join_room_by_code_with_identity(
+        payload.room_code,
+        payload,
         background_tasks,
+    )
+
+
+def join_room_by_code_with_identity(
+    room_code: str,
+    payload: RoomJoinRequest,
+    background_tasks: BackgroundTasks,
+    *,
+    user_id: int | None = None,
+    display_name: str | None = None,
+    elo: int | None = None,
+) -> RoomAccessResponse:
+    """Join by room code after the WebSocket transport verifies any account token."""
+    try:
+        room_id = get_room_id_by_code(room_code)
+    except RedisError as exc:
+        logger.exception("Could not resolve room code")
+        raise _service_unavailable() from exc
+    if room_id is None:
+        raise _room_not_found()
+    return _join_room_response(
+        room_id,
+        payload,
+        background_tasks,
+        user_id=user_id,
+        display_name=display_name,
+        elo=elo,
     )
 
 
@@ -671,6 +785,26 @@ def join_public_room(
     return _join_room_response(room_id, payload, background_tasks)
 
 
+def join_public_room_with_identity(
+    room_id: int,
+    payload: RoomJoinRequest,
+    background_tasks: BackgroundTasks,
+    *,
+    user_id: int | None = None,
+    display_name: str | None = None,
+    elo: int | None = None,
+) -> RoomAccessResponse:
+    """Assign a room seat and bind it to an already verified account when present."""
+    return _join_room_response(
+        room_id,
+        payload,
+        background_tasks,
+        user_id=user_id,
+        display_name=display_name,
+        elo=elo,
+    )
+
+
 @router.post(
     "/{room_id}/ready",
     response_model=RoomSummary,
@@ -708,7 +842,7 @@ def email_room_invitation(
     room_id: int,
     payload: RoomInviteRequest,
 ) -> RoomInviteResponse:
-    """Send the host's room link and numeric room code to a friend."""
+    """Send the host's room link and six-character room code to a friend."""
     room = _room_summary(room_id)
     if room is None:
         raise _room_not_found()
@@ -738,7 +872,7 @@ def email_room_invitation(
         send_room_invitation_email(
             recipient=str(payload.email),
             room_name=room["name"],
-            room_code=str(room_id),
+            room_code=room["room_code"],
             join_url=join_url,
         )
     except EmailConfigurationError as exc:
@@ -757,7 +891,7 @@ def email_room_invitation(
     return RoomInviteResponse(
         message="Invitation email sent",
         email=payload.email,
-        room_code=str(room_id),
+        room_code=room["room_code"],
         join_url=join_url,
     )
 
@@ -1180,7 +1314,7 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
         if reconnected:
             await room_hub.stop_reconnect_timeout(room_id, role)
 
-    await room_hub.connect_room(room_id, websocket, participant_token)
+    await room_hub.connect_room(room_id, websocket, participant_token, role)
     logger.info(
         "Room WebSocket connected",
         extra={
@@ -1192,13 +1326,28 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
     )
     try:
         game = None
+        try:
+            chat_history = await run_in_threadpool(get_chat_history, room_id)
+        except RedisError:
+            logger.exception("Could not read chat history for room %s", room_id)
+            await websocket.close(code=1011, reason="Room service is unavailable")
+            return
         if room["status"] in {"playing", "finished"}:
             game = await run_in_threadpool(get_game_snapshot, room_id)
         if room["status"] == "playing":
             await room_hub.ensure_timer(room_id)
         await room_hub.send_to_client(
             websocket,
-            {"type": "room.snapshot", "room": room, "role": role, "game": game},
+            {
+                "type": "room.snapshot",
+                "room": room,
+                "role": role,
+                "game": game,
+                "chat_history": chat_history,
+                "rtc_ice_servers": get_rtc_ice_servers()
+                if role in {"player1", "player2"}
+                else [],
+            },
         )
         await room_hub.start_sender(websocket)
         if reconnected:
@@ -1215,6 +1364,12 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
             message = await websocket.receive_json()
             if isinstance(message, dict) and message.get("type") == "ping":
                 await room_hub.send_to_client(websocket, {"type": "pong"})
+            elif isinstance(message, dict) and message.get("type") == "call_signal":
+                event = _call_signal_event(role, message)
+                if event["type"] == "error":
+                    await room_hub.send_to_client(websocket, event)
+                else:
+                    await room_hub.broadcast_room(room_id, event)
             elif isinstance(message, dict) and message.get("type") == "chat_message":
                 raw_text = message.get("text")
                 if not isinstance(raw_text, str):
@@ -1237,17 +1392,24 @@ async def room_socket(websocket: WebSocket, room_id: int) -> None:
                         "player2": "Người chơi 2",
                         "spectator": "Khán giả",
                     }.get(role, "Kỳ hữu")
-                await room_hub.broadcast_room(
-                    room_id,
-                    {
-                        "type": "chat_message",
-                        "message_id": secrets.token_urlsafe(9),
-                        "role": role,
-                        "sender_name": sender_name.strip()[:80],
-                        "text": chat_text,
-                        "sent_at": int(time.time() * 1000),
-                    },
-                )
+                chat_event = {
+                    "type": "chat_message",
+                    "message_id": secrets.token_urlsafe(9),
+                    "role": role,
+                    "sender_name": sender_name.strip()[:80],
+                    "text": chat_text,
+                    "sent_at": int(time.time() * 1000),
+                }
+                try:
+                    await run_in_threadpool(append_chat_message, room_id, chat_event)
+                except RedisError:
+                    logger.exception("Could not save chat message for room %s", room_id)
+                    await room_hub.send_to_client(
+                        websocket,
+                        {"type": "error", "reason": "chat_service_unavailable"},
+                    )
+                    continue
+                await room_hub.broadcast_room(room_id, chat_event)
             elif isinstance(message, dict) and message.get("type") == "ready":
                 ready = message.get("ready", True)
                 if not isinstance(ready, bool):

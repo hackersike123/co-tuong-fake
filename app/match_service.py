@@ -9,12 +9,27 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .database import SessionLocal
-from .models import Match
+from .models import Match, User
 from .room_access import hash_room_token
-from .room_store import get_game_snapshot, get_room, get_room_participant_roles
+from .room_store import (
+    get_game_snapshot,
+    get_room,
+    get_room_identity,
+    get_room_participant_roles,
+)
 
 
 logger = logging.getLogger(__name__)
+
+ELO_K_FACTOR = 32
+
+
+def elo_changes(red_elo: int, black_elo: int, winner: str | None) -> tuple[int, int]:
+    """Return zero-sum Elo changes for a completed rated Xiangqi game."""
+    expected_red = 1 / (1 + 10 ** ((black_elo - red_elo) / 400))
+    red_score = 1.0 if winner == "w" else 0.0 if winner == "b" else 0.5
+    red_change = round(ELO_K_FACTOR * (red_score - expected_red))
+    return red_change, -red_change
 
 
 def record_completed_match(
@@ -27,6 +42,9 @@ def record_completed_match(
         room = get_room(room_id)
         game = get_game_snapshot(room_id)
         if room is None or game is None or game["status"] != "finished":
+            return None
+        identity = get_room_identity(room_id)
+        if identity is None:
             return None
 
         participant_tokens = get_room_participant_roles(room_id)
@@ -47,14 +65,42 @@ def record_completed_match(
             if existing is not None:
                 return existing
 
+            red_user_id = identity["red_user_id"]
+            black_user_id = identity["black_user_id"]
+            red_elo_change = black_elo_change = 0
+            if (
+                isinstance(red_user_id, int)
+                and isinstance(black_user_id, int)
+                and red_user_id != black_user_id
+            ):
+                rated_users = session.scalars(
+                    select(User)
+                    .where(User.id.in_((red_user_id, black_user_id)))
+                    .order_by(User.id)
+                    .with_for_update()
+                ).all()
+                by_id = {user.id: user for user in rated_users if user.is_active}
+                red_user = by_id.get(red_user_id)
+                black_user = by_id.get(black_user_id)
+                if red_user is not None and black_user is not None:
+                    red_elo_change, black_elo_change = elo_changes(
+                        red_user.elo,
+                        black_user.elo,
+                        game.get("winner"),
+                    )
+                    red_user.elo = max(0, red_user.elo + red_elo_change)
+                    black_user.elo = max(0, black_user.elo + black_elo_change)
+
             match = Match(
                 match_key=match_key,
                 room_id=room_id,
                 room_uuid=room["room_uuid"],
                 round_number=round_number,
                 room_name=room["room_name"],
-                red_player=room["host_name"],
-                black_player="Player 2",
+                red_player=str(identity["red_player"]),
+                black_player=str(identity["black_player"]),
+                red_user_id=red_user_id,
+                black_user_id=black_user_id,
                 result=game.get("result") or "unknown",
                 reason=game.get("reason"),
                 winner=game.get("winner"),
@@ -64,6 +110,8 @@ def record_completed_match(
                 has_password=room["has_password"],
                 allow_spectators=room["allow_spectators"],
                 access_token_hashes=json.dumps(access_token_hashes, separators=(",", ":")),
+                red_elo_change=red_elo_change,
+                black_elo_change=black_elo_change,
             )
             session.add(match)
             try:
@@ -116,16 +164,21 @@ def match_payload(match: Match) -> dict[str, Any]:
     """Serialize a persisted match without relying on an open DB session."""
     return {
         "id": match.id,
+        "match_key": match.match_key,
         "room_id": match.room_id,
         "room_uuid": match.room_uuid,
         "round_number": match.round_number,
         "room_name": match.room_name,
         "red_player": match.red_player,
         "black_player": match.black_player,
+        "red_user_id": match.red_user_id,
+        "black_user_id": match.black_user_id,
         "result": match.result,
         "reason": match.reason,
         "winner": match.winner,
         "notation": match.notation,
         "final_fen": match.final_fen,
         "finished_at": match.finished_at,
+        "red_elo_change": match.red_elo_change,
+        "black_elo_change": match.black_elo_change,
     }

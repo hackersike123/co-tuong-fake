@@ -28,6 +28,7 @@ from ..room_schemas import (
 )
 from ..pve_schemas import PveAiMoveRequest, PveGameStartRequest, PvePlayerMoveRequest
 from ..models import User
+from ..security import decode_access_token
 from . import auth as auth_routes
 from . import pve as pve_routes
 from . import rooms as room_routes
@@ -49,6 +50,23 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_json_value(item) for item in value]
     return value
+
+
+def _socket_user(access_token: Any) -> dict[str, Any] | None:
+    """Resolve an optional access token to server-owned account data."""
+    if access_token is None:
+        return None
+    if not isinstance(access_token, str) or not access_token:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token")
+    try:
+        user_id = decode_access_token(access_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token") from exc
+    with database.SessionLocal() as session:
+        user = session.get(User, user_id)
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=401, detail="Invalid or expired access token")
+        return {"id": user.id, "display_name": user.display_name, "elo": user.elo}
 
 
 def _request_for_socket_login() -> Any:
@@ -73,6 +91,11 @@ def _request_for_socket_login() -> Any:
 
 def _dispatch(event: str, data: dict[str, Any]) -> DispatchResult:
     """Call existing domain services while keeping the public transport on WS."""
+    data = dict(data)
+    socket_user = None
+    if event in {"room.create", "room.join", "room.join_code"}:
+        socket_user = _socket_user(data.pop("auth_token", None))
+
     if event == "system.ping":
         return DispatchResult({"pong": True})
 
@@ -152,14 +175,24 @@ def _dispatch(event: str, data: dict[str, Any]) -> DispatchResult:
         return DispatchResult(room_routes.get_public_rooms())
     if event == "room.create":
         tasks = BackgroundTasks()
-        result = room_routes.create_public_room(
-            RoomCreateRequest.model_validate(data), tasks
+        result = room_routes.create_public_room_with_identity(
+            RoomCreateRequest.model_validate(data),
+            tasks,
+            user_id=socket_user["id"] if socket_user else None,
+            display_name=socket_user["display_name"] if socket_user else None,
+            elo=socket_user["elo"] if socket_user else None,
         )
         return DispatchResult(result, tasks)
     if event == "room.join_code":
         tasks = BackgroundTasks()
-        result = room_routes.join_room_by_code(
-            RoomCodeJoinRequest.model_validate(data), tasks
+        request = RoomCodeJoinRequest.model_validate(data)
+        result = room_routes.join_room_by_code_with_identity(
+            request.room_code,
+            request,
+            tasks,
+            user_id=socket_user["id"] if socket_user else None,
+            display_name=socket_user["display_name"] if socket_user else None,
+            elo=socket_user["elo"] if socket_user else None,
         )
         return DispatchResult(result, tasks)
 
@@ -178,10 +211,13 @@ def _dispatch(event: str, data: dict[str, Any]) -> DispatchResult:
 
         if event == "room.join":
             tasks = BackgroundTasks()
-            result = room_routes.join_public_room(
+            result = room_routes.join_public_room_with_identity(
                 room_id,
                 RoomJoinRequest.model_validate(data),
                 tasks,
+                user_id=socket_user["id"] if socket_user else None,
+                display_name=socket_user["display_name"] if socket_user else None,
+                elo=socket_user["elo"] if socket_user else None,
             )
             return DispatchResult(result, tasks)
         if event == "room.read":

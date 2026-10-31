@@ -1,27 +1,104 @@
 services:
+  database:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-co_tuong}
+      POSTGRES_USER: ${POSTGRES_USER:-co_tuong}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a random hexadecimal value}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD to a random hexadecimal value}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
     volumes:
       - redis-data:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-co_tuong}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB:-co_tuong}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to a random value of at least 32 characters}
+      ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-15}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8002,http://127.0.0.1:8002,http://localhost:8443,http://127.0.0.1:8443}
+      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:8002}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Kỳ Tiên Hội}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-10}
+      RTC_STUN_URLS: ${RTC_STUN_URLS:-stun:stun.l.google.com:19302}
+      RTC_TURN_URLS: ${RTC_TURN_URLS:-}
+      RTC_TURN_USERNAME: ${RTC_TURN_USERNAME:-}
+      RTC_TURN_CREDENTIAL: ${RTC_TURN_CREDENTIAL:-}
+    ports:
+      - "${BACKEND_BIND_ADDRESS:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   nginx:
-    image: nginx:1.30-alpine
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     restart: unless-stopped
     ports:
       - "${NGINX_BIND_ADDRESS:-127.0.0.1}:${NGINX_HTTP_PORT:-8002}:80"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
-      NGINX_BACKEND_UPSTREAM: "${NGINX_BACKEND_UPSTREAM:-host.docker.internal:8000}"
-      NGINX_FRONTEND_UPSTREAM: "${NGINX_FRONTEND_UPSTREAM:-host.docker.internal:8443}"
-      NGINX_ENVSUBST_FILTER: "^(NGINX_BACKEND_UPSTREAM|NGINX_FRONTEND_UPSTREAM)$"
-    volumes:
-      - ./nginx/templates/default.conf.template:/etc/nginx/templates/default.conf.template:ro
-      - ./nginx/snippets/proxy-headers.conf:/etc/nginx/snippets/proxy-headers.conf:ro
-      - ./nginx/snippets/proxy-routes.conf:/etc/nginx/snippets/proxy-routes.conf:ro
+      NGINX_BACKEND_UPSTREAM: backend:8000
+      NGINX_ENVSUBST_FILTER: "^(NGINX_BACKEND_UPSTREAM)$"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
 volumes:
+  postgres-data:
   redis-data:

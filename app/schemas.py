@@ -111,3 +111,18 @@ class UserResponse(BaseModel):
     username: str | None = None
     is_active: bool
     created_at: datetime
+    elo: int = 1000
+
+
+class ProfileUpdateRequest(BaseModel):
+    """Authenticated display-name update."""
+
+    display_name: str = Field(min_length=3, max_length=24)
+
+    @field_validator("display_name")
+    @classmethod
+    def trim_display_name(cls, value: str) -> str:
+        name = value.strip()
+        if len(name) < 3:
+            raise ValueError("Display name must contain at least 3 characters")
+        return name

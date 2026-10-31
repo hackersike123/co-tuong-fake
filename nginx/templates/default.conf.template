@@ -11,20 +11,30 @@ upstream fastapi_backend {
     server ${NGINX_BACKEND_UPSTREAM};
 }
 
-upstream vite_frontend {
-    server ${NGINX_FRONTEND_UPSTREAM};
-}
-
 server {
     listen 80;
     server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
 
     access_log /var/log/nginx/access.log no_query;
 
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok";
+    }
+
     include /etc/nginx/snippets/proxy-routes.conf;
 
+    location /assets/ {
+        try_files $uri =404;
+        access_log off;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
     location / {
-        include /etc/nginx/snippets/proxy-headers.conf;
-        proxy_pass http://vite_frontend;
+        try_files $uri $uri/ /index.html;
     }
 }

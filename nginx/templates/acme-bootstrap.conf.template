@@ -8,6 +8,12 @@ server {
 
     access_log /var/log/nginx/access.log no_query;
 
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok";
+    }
+
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/certbot;
         try_files $uri =404;

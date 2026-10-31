@@ -35,6 +35,7 @@ class RoomHub:
         self._room_clients: dict[int, set[WebSocket]] = defaultdict(set)
         self._active_connection_count = 0
         self._room_participant_tokens: dict[WebSocket, str] = {}
+        self._room_client_roles: dict[WebSocket, str] = {}
         self._outbound_queues: dict[WebSocket, asyncio.Queue[dict[str, Any]]] = {}
         self._sender_tasks: dict[WebSocket, asyncio.Task[None]] = {}
         self._send_locks: dict[WebSocket, asyncio.Lock] = {}
@@ -98,6 +99,7 @@ class RoomHub:
             self._lobby_clients.clear()
             self._room_clients.clear()
             self._room_participant_tokens.clear()
+            self._room_client_roles.clear()
             self._active_connection_count = 0
 
         self._pubsub_ready = False
@@ -222,7 +224,18 @@ class RoomHub:
             if isinstance(participant_token, str):
                 await self._revoke_local_participant(room_id, participant_token)
             return
-        self._enqueue_events(tuple(self._room_clients.get(room_id, ())), event)
+        target_role = event.get("_target_role")
+        if target_role in {"player1", "player2"}:
+            clients = tuple(
+                websocket
+                for websocket in self._room_clients.get(room_id, ())
+                if self._room_client_roles.get(websocket) == target_role
+            )
+            delivered_event = {key: value for key, value in event.items() if key != "_target_role"}
+        else:
+            clients = tuple(self._room_clients.get(room_id, ()))
+            delivered_event = event
+        self._enqueue_events(clients, delivered_event)
 
     async def _revoke_local_participant(
         self,
@@ -240,6 +253,7 @@ class RoomHub:
                     continue
                 clients.discard(websocket)
                 self._room_participant_tokens.pop(websocket, None)
+                self._room_client_roles.pop(websocket, None)
                 self._active_connection_count -= 1
                 queue = self._outbound_queues.get(websocket)
                 if queue is not None:
@@ -321,6 +335,7 @@ class RoomHub:
         room_id: int,
         websocket: WebSocket,
         participant_token: str,
+        role: str,
     ) -> None:
         await websocket.accept()
         async with self._lock:
@@ -329,6 +344,7 @@ class RoomHub:
                 clients.add(websocket)
                 self._active_connection_count += 1
             self._room_participant_tokens[websocket] = participant_token
+            self._room_client_roles[websocket] = role
             self._prepare_sender(websocket)
 
     async def disconnect_room(self, room_id: int, websocket: WebSocket) -> None:
@@ -342,6 +358,7 @@ class RoomHub:
             if not clients:
                 self._room_clients.pop(room_id, None)
             self._room_participant_tokens.pop(websocket, None)
+            self._room_client_roles.pop(websocket, None)
             self._remove_sender(websocket)
 
     async def has_participant_connection(

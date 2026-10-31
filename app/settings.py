@@ -17,6 +17,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./co_tuong.db")
+APP_ENV = os.getenv("APP_ENV", "local").strip().lower()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "http://localhost:5173").rstrip("/")
@@ -87,3 +88,31 @@ SMTP_TIMEOUT_SECONDS = float(os.getenv("SMTP_TIMEOUT_SECONDS", "10"))
 JWT_SECRET = os.getenv("JWT_SECRET", "")
 ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "15"))
 REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+AUTH_COOKIE_SECURE = _env_bool("AUTH_COOKIE_SECURE", True)
+
+RTC_STUN_URLS = tuple(
+    url.strip()
+    for url in os.getenv("RTC_STUN_URLS", "stun:stun.l.google.com:19302").split(",")
+    if url.strip()
+)
+RTC_TURN_URLS = tuple(
+    url.strip() for url in os.getenv("RTC_TURN_URLS", "").split(",") if url.strip()
+)
+RTC_TURN_USERNAME = os.getenv("RTC_TURN_USERNAME", "")
+RTC_TURN_CREDENTIAL = os.getenv("RTC_TURN_CREDENTIAL", "")
+
+
+def get_rtc_ice_servers() -> list[dict[str, object]]:
+    """Build WebRTC ICE config; TURN credentials are sent only to room players."""
+    ice_servers: list[dict[str, object]] = []
+    if RTC_STUN_URLS:
+        ice_servers.append({"urls": list(RTC_STUN_URLS)})
+    if RTC_TURN_URLS and RTC_TURN_USERNAME and RTC_TURN_CREDENTIAL:
+        ice_servers.append(
+            {
+                "urls": list(RTC_TURN_URLS),
+                "username": RTC_TURN_USERNAME,
+                "credential": RTC_TURN_CREDENTIAL,
+            }
+        )
+    return ice_servers

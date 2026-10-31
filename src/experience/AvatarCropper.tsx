@@ -1,6 +1,7 @@
 import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import { Button, InputField } from "@figma/astraui";
 import { RotateCcw, RotateCw } from "lucide-react";
+import { useApp } from "../context";
 import { useExperience } from "./Experience";
 import { getCultivationRank } from "../ranks";
 import {
@@ -28,8 +29,8 @@ export function AvatarCropper({
   onError: (message: string) => void;
   disabled: boolean;
 }) {
-  const { demoElo } = useExperience();
-  const rank = getCultivationRank(demoElo);
+  const { currentUser } = useApp();
+  const rank = currentUser ? getCultivationRank(currentUser.elo) : null;
   const canvas = useRef<HTMLCanvasElement>(null);
   const drag = useRef<{
     x: number;
@@ -47,7 +48,7 @@ export function AvatarCropper({
   }, [image, crop, onError]);
   return (
     <div className="profile-crop-controls">
-      <div className={`profile-crop-frame rank-framed cultivation-${rank.index}`}>
+      <div className={`profile-crop-frame ${rank ? `rank-framed cultivation-${rank.index}` : ""}`}>
         <div className="avatar-crop-window">
           <canvas
             ref={canvas}

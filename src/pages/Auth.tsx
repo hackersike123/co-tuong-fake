@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { ChessBoard, Heading } from "../components";
 import { useApp } from "../context";
+import { apiFetch } from "../services/api";
 
 export default function Auth() {
   const {
@@ -124,7 +125,12 @@ export default function Auth() {
       }
       return;
     }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    const identifier = email.trim();
+    if (page === "login" && !identifier) {
+      setError("Vui lòng nhập email hoặc tên đăng nhập.");
+      return;
+    }
+    if (["register", "forgot"].includes(page) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier)) {
       setError("Vui lòng nhập địa chỉ email hợp lệ.");
       return;
     }
@@ -166,12 +172,12 @@ export default function Auth() {
         setAuthFlow("register");
         go("otp");
       } else {
-        const session = await request<{
-          access_token: string;
-          user: { display_name: string; username?: string | null };
-        }>("auth.login", { identifier: email, password, remember_me: remember });
+        const session = await apiFetch<{ access_token: string }>("/api/v1/auth/login", {
+          method: "POST",
+          body: { identifier, password, remember_me: remember },
+        });
         setAuthToken(session.access_token);
-        setUsername(session.user.display_name || session.user.username || email);
+        setUsername(identifier);
         notify("Đăng nhập thành công. Chúc bạn có những ván cờ hay!");
         go("home");
       }
@@ -233,7 +239,7 @@ export default function Auth() {
         <Heading level={1}>{titles[page]}</Heading>
         <div className="muted auth-description">
           {descriptions[page]}
-          {page === "otp" && <div className="auth-email">{authEmail || "kyhuu@example.com"}</div>}
+          {page === "otp" && <div className="auth-email">{authEmail || "—"}</div>}
         </div>
         <form className="form-stack auth-form" onSubmit={submit} noValidate>
           {page === "register" && (
@@ -342,7 +348,7 @@ export default function Auth() {
           {page === "login" && (
             <div className="between login-options">
               <Checkbox
-                label="Giữ phiên đăng nhập trong tab này"
+                label="Duy trì đăng nhập trên thiết bị này"
                 defaultChecked
                 onChange={setRemember}
               />

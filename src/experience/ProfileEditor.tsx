@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button, InputField } from "@figma/astraui";
 import { AlertCircle, Check, ShieldCheck, Upload } from "lucide-react";
 import { Dialog, UserAvatar } from "../components";
-import { useApp } from "../context";
+import { useApp, type PlayerAccount } from "../context";
 import { playerInitials } from "../data";
 import { useExperience } from "./Experience";
 import { AvatarCropper } from "./AvatarCropper";
+import { apiFetch } from "../services/api";
 import {
   decodeAvatar,
   encodeAvatar,
@@ -47,8 +48,8 @@ export function ProfileEditor({ onClose }: { onClose: () => void }) {
 }
 
 function ProfileEditorForm({ onClose }: { onClose: () => void }) {
-  const { notify } = useApp();
-  const { profile, demoElo, saveProfile, profileWarning } = useExperience();
+  const { notify, currentUser, authToken, refreshData } = useApp();
+  const { profile, saveProfile, profileWarning } = useExperience();
   const [name, setName] = useState(profile.name);
   const [tone, setTone] = useState<ProfileTone>(profile.tone);
   const [useUpload, setUseUpload] = useState(Boolean(profile.image));
@@ -128,12 +129,26 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
       let image = useUpload ? profile.image : null;
       if (useUpload && sourceImage && (newUpload || cropChanged))
         image = await encodeAvatar(sourceImage, crop);
+      const remoteNameChanged = Boolean(currentUser && canonicalName !== currentUser.display_name);
+      if (remoteNameChanged) {
+        await apiFetch<PlayerAccount>("/api/v1/users/me", {
+          method: "PATCH",
+          token: authToken,
+          body: { display_name: canonicalName },
+        });
+      }
       const result = await saveProfile({ name: canonicalName, tone, image });
       if (!result.ok) {
+        if (remoteNameChanged) await refreshData();
         setSaveError(result.error || "Chưa thể lưu hồ sơ.");
         return;
       }
-      notify("Đã lưu tên và ảnh đại diện cục bộ trên trình duyệt. Không gửi lên máy chủ.");
+      if (remoteNameChanged) await refreshData();
+      notify(
+        remoteNameChanged
+          ? "Đã cập nhật tên trên máy chủ; ảnh đại diện vẫn chỉ lưu trên trình duyệt."
+          : "Ảnh đại diện chỉ lưu trên trình duyệt này; chưa có đồng bộ ảnh lên máy chủ.",
+      );
       onClose();
     } catch (error) {
       setSaveError(
@@ -179,8 +194,8 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
         <div className="profile-local-note">
           <ShieldCheck size={18} />
           <span>
-            Hồ sơ demo chỉ lưu trên trình duyệt này. Chọn ảnh, căn chỉnh và đổi tên trước khi lưu
-            một lần.
+            Tên kỳ thủ đã đăng nhập được cập nhật trên máy chủ; ảnh đại diện và lựa chọn màu chỉ lưu
+            trên trình duyệt này.
           </span>
         </div>
         {profileWarning && (
@@ -208,7 +223,7 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
                     initials={playerInitials(name)}
                     tone={option.tone}
                     image={null}
-                    elo={demoElo}
+                    elo={currentUser?.elo}
                     className="edit-avatar profile-preset-avatar"
                   />
                   {selected && (
@@ -276,7 +291,7 @@ function ProfileEditorForm({ onClose }: { onClose: () => void }) {
                 initials={playerInitials(name)}
                 tone={tone}
                 image={useUpload ? profile.imageUrl : null}
-                elo={demoElo}
+                elo={currentUser?.elo}
                 className="profile-large-avatar"
               />
             )}

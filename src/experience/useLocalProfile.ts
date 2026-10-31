@@ -53,8 +53,7 @@ export function useLocalProfile() {
     [profile.imageUrl],
   );
 
-  // Existing demo registration can still set a session name without saving a profile.
-  const setDemoName = useCallback((name: string) => {
+  const setProfileName = useCallback((name: string) => {
     sessionNameRevision.current++;
     setProfile((previous) => ({ ...previous, name: name.trim() }));
   }, []);
@@ -87,5 +86,5 @@ export function useLocalProfile() {
     }
   }, []);
 
-  return { profile, profileReady, profileWarning, saveProfile, setDemoName };
+  return { profile, profileReady, profileWarning, saveProfile, setProfileName };
 }

@@ -20,9 +20,10 @@ from .room_hub import room_hub
 from . import room_store
 from .routers.auth import router as auth_router
 from .routers.pve import router as pve_router
+from .routers.players import router as players_router
 from .routers.rooms import router as rooms_router
 from .routers.ws_api import router as websocket_api_router
-from .settings import CORS_ALLOWED_ORIGINS, LOG_LEVEL
+from .settings import APP_ENV, CORS_ALLOWED_ORIGINS, LOG_LEVEL
 
 
 configure_logging(LOG_LEVEL)
@@ -109,14 +110,16 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["accounts"])
 app.include_router(rooms_router, prefix="/api/v1/rooms", tags=["rooms"])
 app.include_router(pve_router, prefix="/api/v1/pve", tags=["single-player"])
+app.include_router(players_router, prefix="/api/v1", tags=["players", "community"])
 app.include_router(websocket_api_router, prefix="/api/v1", tags=["websocket-rpc"])
 
 
-@app.get("/demo/rooms", include_in_schema=False)
-def room_lobby_demo() -> FileResponse:
-    """Serve the lightweight room-creation modal for local demonstrations."""
-    demo_path = Path(__file__).parent / "static" / "room_lobby.html"
-    return FileResponse(demo_path, media_type="text/html; charset=utf-8")
+if APP_ENV == "local":
+    @app.get("/dev/rooms", include_in_schema=False)
+    def room_lobby_dev() -> FileResponse:
+        """Serve a local-only API/WebSocket test client; never expose it in staging or production."""
+        dev_path = Path(__file__).parent / "static" / "room_lobby.html"
+        return FileResponse(dev_path, media_type="text/html; charset=utf-8")
 
 
 @app.get("/health", tags=["health"], include_in_schema=False)

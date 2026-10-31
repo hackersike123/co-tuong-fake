@@ -27,6 +27,8 @@ import type { AudioCue } from "./experience/audio";
 import { CULTIVATION_LAYERS, CULTIVATION_RANKS, getCultivationRank } from "./ranks";
 import { RankBadge } from "./rank-ui";
 import { SettingSwitch } from "./experience/SettingSwitch";
+import { intlLocale } from "./i18n-core";
+import { useLanguage } from "./i18n";
 
 export function GlobalDialogs({ modal, onClose }: { modal: ModalName; onClose: () => void }) {
   if (modal === "create") return <CreateRoomDialog onClose={onClose} />;
@@ -41,7 +43,6 @@ export function GlobalDialogs({ modal, onClose }: { modal: ModalName; onClose: (
 }
 
 function CreateRoomDialog({ onClose }: { onClose: () => void }) {
-  const { demoElo } = useExperience();
   const {
     username,
     profileTone,
@@ -83,23 +84,26 @@ function CreateRoomDialog({ onClose }: { onClose: () => void }) {
       });
       const room: Room = {
         id: String(access.id),
+        roomCode: access.room_code || String(access.id),
         name: access.room_name,
         host: access.host_name,
         ownedByMe: true,
         initials: playerInitials(access.host_name),
-        elo: demoElo,
+        elo: access.host_elo,
         seconds: access.timer_seconds,
         players: access.player_count,
         private: !access.is_public,
         spectators: access.allow_spectators,
         tone: profileTone,
+        player2Name: access.player2_name,
+        player2Elo: access.player2_elo,
       };
       setRoomList((list) => [room, ...list]);
       setActiveRoom(room);
       setRoomAccess(access);
       setIsHost(true);
       go("waiting");
-      notify(`Đã tạo phòng ${room.id}.`);
+      notify(`Đã tạo phòng ${room.roomCode}.`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Không thể tạo phòng.");
     } finally {
@@ -227,7 +231,9 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
         <Lock size={27} />
       </div>
       <Heading level={3}>{activeRoom.name}</Heading>
-      <div className="muted small mt-xs">#{activeRoom.id} · Phòng riêng tư</div>
+      <div className="muted small mt-xs">
+        #{activeRoom.roomCode || activeRoom.id} · Phòng riêng tư
+      </div>
       <div className="modal-intro mt-xs">Nhập mật khẩu được chủ phòng chia sẻ để tham gia.</div>
       <form
         className="form-stack"
@@ -285,6 +291,7 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
   const [inviteEmail, setInviteEmail] = useState("");
   const [emailPending, setEmailPending] = useState(false);
   const [emailError, setEmailError] = useState("");
+  const roomCode = activeRoom.roomCode || activeRoom.id;
   const link = roomAccess?.join_url || `${window.location.origin}/room/${activeRoom.id}`;
   async function sendEmailInvite() {
     if (!roomAccess || !inviteEmail.trim()) return;
@@ -326,13 +333,13 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
         "noopener,noreferrer",
       );
     else if (channel === "Email")
-      window.location.href = `mailto:?subject=${encodeURIComponent("Mời bạn một ván cờ trên Kỳ Tiên Hội")}&body=${encodeURIComponent(`Cùng giao lưu tại phòng ${activeRoom.name}.\nMã phòng: ${activeRoom.id}\n${link}`)}`;
+      window.location.href = `mailto:?subject=${encodeURIComponent("Mời bạn một ván cờ trên Kỳ Tiên Hội")}&body=${encodeURIComponent(`Cùng giao lưu tại phòng ${activeRoom.name}.\nMã phòng: ${roomCode}\n${link}`)}`;
     else {
       if (navigator.share) {
         try {
           await navigator.share({
             title: "Cùng khai cuộc trên Kỳ Tiên Hội",
-            text: `Mời bạn vào phòng ${activeRoom.id}`,
+            text: `Mời bạn vào phòng ${roomCode}`,
             url: link,
           });
         } catch {
@@ -358,12 +365,12 @@ function ShareDialog({ onClose }: { onClose: () => void }) {
       <div className="share-code-area">
         <span className="small muted">MÃ PHÒNG</span>
         <div className="between">
-          <span className="share-big-code">{activeRoom.id}</span>
+          <span className="share-big-code">{roomCode}</span>
           <Button
             variant="neutral"
             size="small"
             iconStart={<Copy size={15} />}
-            onClick={() => copy(activeRoom.id, "Đã sao chép mã phòng.")}
+            onClick={() => copy(roomCode, "Đã sao chép mã phòng.")}
           >
             Sao chép mã
           </Button>
@@ -710,7 +717,9 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           onChange={(value) => updateSettings({ motionPreference: value as MotionPreference })}
           description={
             settings.motionPreference === "system"
-              ? `Thiết bị hiện ${systemReducedMotion ? "giảm" : "cho phép"} chuyển động. Tự cập nhật khi thiết lập hệ điều hành thay đổi.`
+              ? `Thiết bị hiện ${
+                  systemReducedMotion ? "giảm" : "cho phép"
+                } chuyển động. Tự cập nhật khi thiết lập hệ điều hành thay đổi.`
               : settings.motionPreference === "reduce"
                 ? "Dừng hoạt cảnh trang trí; giữ rõ lượt đi, cảnh báo chiếu và nước vừa đi."
                 : "Cho phép hoạt cảnh trang trí, không phụ thuộc thiết lập của thiết bị."
@@ -743,21 +752,25 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
 }
 
 function RankGuide({ onClose }: { onClose: () => void }) {
-  const { demoElo } = useExperience();
-  const current = getCultivationRank(demoElo);
+  const { language } = useLanguage();
+  const locale = intlLocale(language);
+  const { currentUser } = useApp();
+  const current = currentUser ? getCultivationRank(currentUser.elo) : null;
   return (
     <Modal isOpen onClose={onClose} title="Lộ trình 13 cảnh giới" size="large">
       <div className="info-message">
         <ShieldCheck size={17} />
         <span>
-          Ngưỡng Elo minh họa riêng của Kỳ Tiên Hội, có thể điều chỉnh trong cấu hình; không phải
-          tiêu chuẩn xếp hạng quốc tế. Mỗi cảnh giới có {CULTIVATION_LAYERS} tầng.
+          Ngưỡng cảnh giới do Kỳ Tiên Hội định nghĩa; không phải tiêu chuẩn xếp hạng quốc tế. Mỗi
+          cảnh giới có {CULTIVATION_LAYERS} tầng.
         </span>
       </div>
       <div className="realm-guide-grid">
         {CULTIVATION_RANKS.map((realm, index) => (
           <div
-            className={`realm-guide-item cultivation-${index} ${current.index === index ? "current-realm" : ""}`}
+            className={`realm-guide-item cultivation-${index} ${
+              current?.index === index ? "current-realm" : ""
+            }`}
             key={realm.name}
           >
             <UserAvatar
@@ -768,8 +781,8 @@ function RankGuide({ onClose }: { onClose: () => void }) {
             <div>
               <RankBadge elo={realm.minElo} />
               <div className="small muted">
-                Từ {realm.minElo.toLocaleString("vi-VN")} Elo
-                {current.index === index ? " · Bạn đang ở đây" : ""}
+                Từ {realm.minElo.toLocaleString(locale)} Elo
+                {current?.index === index ? " · Bạn đang ở đây" : ""}
               </div>
             </div>
           </div>

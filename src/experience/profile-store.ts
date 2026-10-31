@@ -13,7 +13,7 @@ export type ProfileRecord = {
   image: Blob | null;
 };
 export const DEFAULT_PROFILE: ProfileRecord = {
-  name: "Minh Anh",
+  name: "Kỳ hữu",
   tone: "sage",
   image: null,
 };

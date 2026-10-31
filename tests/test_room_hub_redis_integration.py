@@ -52,7 +52,7 @@ def test_room_and_lobby_events_reach_another_worker() -> None:
                     raise AssertionError("Redis Pub/Sub workers did not become ready")
                 await asyncio.sleep(0.01)
 
-            await subscriber.connect_room(9_876_543, room_socket, "test-participant")
+            await subscriber.connect_room(9_876_543, room_socket, "test-participant", "player1")
             await subscriber.start_sender(room_socket)
             await subscriber.connect_lobby(lobby_socket)
             await subscriber.start_sender(lobby_socket)

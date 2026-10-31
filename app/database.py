@@ -31,7 +31,32 @@ def get_session() -> Iterator[Session]:
 
 
 def upgrade_sqlite_schema(target_engine=engine) -> None:
-    """Add auth columns/tables to an existing demo database without losing accounts."""
+    """Add new account and match columns to existing databases without losing data."""
+    if target_engine.dialect.name == "postgresql":
+        with target_engine.begin() as connection:
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN IF NOT EXISTS elo INTEGER NOT NULL DEFAULT 1000")
+            )
+            if inspect(connection).has_table("matches"):
+                connection.execute(
+                    text(
+                        "ALTER TABLE matches ADD COLUMN IF NOT EXISTS red_user_id INTEGER "
+                        "REFERENCES users(id) ON DELETE SET NULL"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "ALTER TABLE matches ADD COLUMN IF NOT EXISTS black_user_id INTEGER "
+                        "REFERENCES users(id) ON DELETE SET NULL"
+                    )
+                )
+                connection.execute(
+                    text("ALTER TABLE matches ADD COLUMN IF NOT EXISTS red_elo_change INTEGER NOT NULL DEFAULT 0")
+                )
+                connection.execute(
+                    text("ALTER TABLE matches ADD COLUMN IF NOT EXISTS black_elo_change INTEGER NOT NULL DEFAULT 0")
+                )
+        return
     if target_engine.dialect.name != "sqlite":
         return
 
@@ -40,6 +65,10 @@ def upgrade_sqlite_schema(target_engine=engine) -> None:
         columns = {column["name"] for column in inspector.get_columns("users")}
         if "username" not in columns:
             connection.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR(32)"))
+        if "elo" not in columns:
+            connection.execute(
+                text("ALTER TABLE users ADD COLUMN elo INTEGER NOT NULL DEFAULT 1000")
+            )
         connection.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users (username)")
         )
@@ -53,6 +82,10 @@ def upgrade_sqlite_schema(target_engine=engine) -> None:
                 "has_password": "BOOLEAN NOT NULL DEFAULT 0",
                 "allow_spectators": "BOOLEAN NOT NULL DEFAULT 0",
                 "access_token_hashes": "TEXT NOT NULL DEFAULT '{}'",
+                "red_user_id": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
+                "black_user_id": "INTEGER REFERENCES users(id) ON DELETE SET NULL",
+                "red_elo_change": "INTEGER NOT NULL DEFAULT 0",
+                "black_elo_change": "INTEGER NOT NULL DEFAULT 0",
             }
             for column_name, column_type in migrations.items():
                 if column_name not in match_columns:

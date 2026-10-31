@@ -18,6 +18,7 @@ class User(Base):
     username: Mapped[str | None] = mapped_column(String(32), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(80))
     password_hash: Mapped[str] = mapped_column(String(512))
+    elo: Mapped[int] = mapped_column(Integer, default=1000, server_default="1000", nullable=False)
     is_active: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false(), nullable=False
     )
@@ -74,6 +75,12 @@ class Match(Base):
     room_name: Mapped[str] = mapped_column(String(80), nullable=False)
     red_player: Mapped[str] = mapped_column(String(80), nullable=False)
     black_player: Mapped[str] = mapped_column(String(80), nullable=False)
+    red_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    black_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
     result: Mapped[str] = mapped_column(String(40), nullable=False)
     reason: Mapped[str | None] = mapped_column(String(40))
     winner: Mapped[str | None] = mapped_column(String(1))
@@ -83,6 +90,8 @@ class Match(Base):
     has_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     allow_spectators: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     access_token_hashes: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    red_elo_change: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    black_elo_change: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     finished_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -1,5 +1,24 @@
 import { createContext, useContext } from "react";
-import type { GameRecord, Page, Room, Side } from "./data";
+import type { Dispatch, SetStateAction } from "react";
+import type {
+  CommunitySummary,
+  GameRecord,
+  Page,
+  PlayerStats,
+  RankedPlayer,
+  Room,
+  Side,
+} from "./data";
+
+export type PlayerAccount = {
+  id: number;
+  display_name: string;
+  email: string;
+  username: string | null;
+  is_active: boolean;
+  created_at: string;
+  elo: number;
+};
 
 export type ModalName =
   | "create"
@@ -22,9 +41,13 @@ export type RoomAccess = {
   id: number;
   room_id: number;
   room_uuid: string;
+  room_code: string;
   room_name: string;
   name: string;
   host_name: string;
+  host_elo?: number | null;
+  player2_name?: string | null;
+  player2_elo?: number | null;
   visibility: "public" | "private";
   is_public: boolean;
   has_password: boolean;
@@ -55,13 +78,21 @@ export type AppContextValue = {
   setAuthToken: (token: string) => void;
   signedIn: boolean;
   setSignedIn: (value: boolean) => void;
+  currentUser: PlayerAccount | null;
+  setCurrentUser: (value: PlayerAccount | null) => void;
+  playerStats: PlayerStats | null;
+  leaderboard: RankedPlayer[];
+  recentMatches: GameRecord[];
+  myMatches: GameRecord[];
+  communitySummary: CommunitySummary | null;
+  refreshData: () => Promise<void>;
   username: string;
   setUsername: (value: string) => void;
   profileTone: string;
   roomList: Room[];
   setRoomList: React.Dispatch<React.SetStateAction<Room[]>>;
   activeRoom: Room;
-  setActiveRoom: (room: Room) => void;
+  setActiveRoom: Dispatch<SetStateAction<Room>>;
   roomAccess: RoomAccess | null;
   setRoomAccess: (access: RoomAccess | null) => void;
   isHost: boolean;
@@ -75,7 +106,7 @@ export type AppContextValue = {
   setAuthFlow: (value: "register" | "reset" | "activate") => void;
   authEmail: string;
   setAuthEmail: (value: string) => void;
-  selectedRecord: GameRecord;
+  selectedRecord: GameRecord | null;
   viewRecord: (record: GameRecord) => void;
 };
 
