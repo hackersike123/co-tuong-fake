@@ -298,3 +298,77 @@ def test_live_game_moves_and_timeout_use_redis_server_state(
     finally:
         for key in room_store.redis_client.scan_iter(match=f"{prefix}:*"):
             room_store.redis_client.delete(key)
+
+
+def test_draw_resignation_notation_and_rematch_scripts_use_redis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        room_store.redis_client.ping()
+    except RedisError:
+        pytest.skip("Configured Redis server is unavailable")
+
+    namespace = uuid4().hex
+    prefix = f"test:room-results:{namespace}"
+    monkeypatch.setattr(room_store, "PUBLIC_ROOMS_KEY", f"{prefix}:public")
+    monkeypatch.setattr(room_store, "ROOM_SEQUENCE_KEY", f"{prefix}:sequence")
+    monkeypatch.setattr(room_store, "_room_key", lambda room_id: f"{prefix}:room:{room_id}")
+    monkeypatch.setattr(
+        room_store,
+        "_participants_key",
+        lambda room_id: f"{prefix}:room:{room_id}:participants",
+    )
+    monkeypatch.setattr(
+        room_store,
+        "_spectators_key",
+        lambda room_id: f"{prefix}:room:{room_id}:spectators",
+    )
+
+    try:
+        room, host_token = room_store.create_room("Results integration", timer_seconds=60)
+        room_id = room["id"]
+        opponent_token = f"opponent-{namespace}"
+        assert room_store.join_room(room_id, opponent_token) == "player2"
+        assert room_store.set_player_ready(room_id, opponent_token) == 1
+        assert room_store.start_room(room_id, host_token) == 1
+
+        initial = room_store.get_game_snapshot(room_id)
+        assert initial is not None
+        next_state = apply_move(
+            XiangqiState.from_fen(initial["fen"]),
+            Move((9, 1), (7, 0)),
+        )
+        assert room_store.apply_game_move(
+            room_id,
+            initial["version"],
+            initial["fen"],
+            "w",
+            next_state.turn.value,
+            next_state.to_fen(),
+            notation="1. b9-a7",
+        ) == 1
+        assert room_store.get_game_snapshot(room_id)["notation"] == "1. b9-a7"
+
+        assert room_store.offer_draw(room_id, host_token, "player1") == 1
+        assert room_store.respond_to_draw(room_id, opponent_token, "player2", False) == 1
+        assert room_store.offer_draw(room_id, host_token, "player1") == 1
+        assert room_store.respond_to_draw(room_id, opponent_token, "player2", True) == 2
+        agreed = room_store.get_game_snapshot(room_id)
+        assert agreed is not None
+        assert agreed["result"] == "agreement"
+        assert agreed["winner"] is None
+
+        assert room_store.request_rematch(room_id, host_token, "player1") == 1
+        assert room_store.request_rematch(room_id, opponent_token, "player2") == 2
+        assert room_store.get_room(room_id)["status"] == "waiting"
+        assert room_store.set_player_ready(room_id, opponent_token) == 1
+        assert room_store.start_room(room_id, host_token) == 1
+        assert room_store.get_game_snapshot(room_id)["round_number"] == 2
+        assert room_store.resign_game(room_id, opponent_token, "player2") == 1
+        resigned = room_store.get_game_snapshot(room_id)
+        assert resigned is not None
+        assert resigned["result"] == "resignation"
+        assert resigned["winner"] == "w"
+    finally:
+        for key in room_store.redis_client.scan_iter(match=f"{prefix}:*"):
+            room_store.redis_client.delete(key)

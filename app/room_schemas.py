@@ -1,5 +1,6 @@
 """Request and response models for public game rooms."""
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -108,13 +109,38 @@ class RoomGameSnapshot(BaseModel):
     timer_seconds: Literal[15, 30, 60]
     status: Literal["playing", "finished"]
     result: str | None = None
+    reason: str | None = None
     winner: Literal["w", "b"] | None = None
+    round_number: int = 0
+    notation: str = ""
+    draw_offer_by: Literal["player1", "player2"] | None = None
+    rematch_requested_by: list[Literal["player1", "player2"]] = Field(
+        default_factory=list
+    )
     paused: bool = False
     disconnected_players: list[Literal["player1", "player2"]] = Field(default_factory=list)
     reconnect_deadlines_ms: dict[Literal["player1", "player2"], int] = Field(
         default_factory=dict
     )
     server_time_ms: int
+
+
+class RoomMatchHistory(BaseModel):
+    """Saved result and move notation for one completed room round."""
+
+    id: int
+    room_id: int
+    room_uuid: str
+    round_number: int
+    room_name: str
+    red_player: str
+    black_player: str
+    result: str
+    reason: str | None
+    winner: Literal["w", "b"] | None
+    notation: str
+    final_fen: str
+    finished_at: datetime
 
 
 class RoomMoveRequest(BaseModel):

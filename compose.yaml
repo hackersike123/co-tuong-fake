@@ -7,5 +7,21 @@ services:
     volumes:
       - redis-data:/data
 
+  nginx:
+    image: nginx:1.30-alpine
+    restart: unless-stopped
+    ports:
+      - "${NGINX_BIND_ADDRESS:-127.0.0.1}:${NGINX_HTTP_PORT:-8002}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      NGINX_BACKEND_UPSTREAM: "${NGINX_BACKEND_UPSTREAM:-host.docker.internal:8000}"
+      NGINX_FRONTEND_UPSTREAM: "${NGINX_FRONTEND_UPSTREAM:-host.docker.internal:8443}"
+      NGINX_ENVSUBST_FILTER: "^(NGINX_BACKEND_UPSTREAM|NGINX_FRONTEND_UPSTREAM)$"
+    volumes:
+      - ./nginx/templates/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/snippets/proxy-headers.conf:/etc/nginx/snippets/proxy-headers.conf:ro
+      - ./nginx/snippets/proxy-routes.conf:/etc/nginx/snippets/proxy-routes.conf:ro
+
 volumes:
   redis-data:

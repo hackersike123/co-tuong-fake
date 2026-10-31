@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Button,
   IconButton,
@@ -6,7 +6,7 @@ import {
   SidebarNavigation,
   ThemeProvider,
   useTheme,
-} from "@figma/astraui"
+} from "@figma/astraui";
 import {
   AlertCircle,
   ArrowRight,
@@ -27,25 +27,25 @@ import {
   Trophy,
   User,
   X,
-} from "lucide-react"
-import { Heading, OnlineStatus, UserAvatar } from "./components"
-import { AppContext, type GameConfig, type ModalName } from "./context"
+} from "lucide-react";
+import { Heading, OnlineStatus, UserAvatar } from "./components";
+import { AppContext, type GameConfig, type ModalName, type RoomAccess } from "./context";
 import {
   gameHistory,
   playerInitials,
-  rooms,
   type GameRecord,
   type Page,
   type Room,
   type Side,
-} from "./data"
-import Home from "./pages/Home"
-import Rooms from "./pages/Rooms"
-import Auth from "./pages/Auth"
-import { AISetup, Game, Replay, WaitingRoom } from "./pages/Play"
-import { History, Leaderboard, Profile } from "./pages/Community"
-import { GlobalDialogs } from "./dialogs"
-import { ExperienceProvider, useExperience } from "./experience/Experience"
+} from "./data";
+import { WebSocketRpcClient } from "./services/socket";
+import Home from "./pages/Home";
+import Rooms from "./pages/Rooms";
+import Auth from "./pages/Auth";
+import { AISetup, Game, Replay, WaitingRoom } from "./pages/Play";
+import { History, Leaderboard, Profile } from "./pages/Community";
+import { GlobalDialogs } from "./dialogs";
+import { ExperienceProvider, useExperience } from "./experience/Experience";
 
 const slugs: Record<Page, string> = {
   home: "sanh-chinh",
@@ -62,7 +62,7 @@ const slugs: Record<Page, string> = {
   forgot: "quen-mat-khau",
   otp: "xac-minh-email",
   reset: "mat-khau-moi",
-}
+};
 const pageNames: Record<Page, string> = {
   home: "Sảnh chính",
   rooms: "Sảnh đấu",
@@ -78,102 +78,276 @@ const pageNames: Record<Page, string> = {
   forgot: "Quên mật khẩu",
   otp: "Xác minh email",
   reset: "Mật khẩu mới",
-}
+};
 function pageFromHash(): Page {
-  const hash = window.location.hash.replace("#", "").split("?")[0]
-  return (
-    (Object.keys(slugs) as Page[]).find((page) => slugs[page] === hash) ||
-    "home"
-  )
+  const hash = window.location.hash.replace("#", "").split("?")[0];
+  return (Object.keys(slugs) as Page[]).find((page) => slugs[page] === hash) || "home";
+}
+
+function loadStoredRoomAccess(): RoomAccess | null {
+  try {
+    const raw = sessionStorage.getItem("co-tuong-room-access");
+    if (!raw) return null;
+    const access = JSON.parse(raw) as RoomAccess;
+    return access.participant_token && access.id > 0 ? access : null;
+  } catch {
+    return null;
+  }
+}
+
+function roomViewFromAccess(access: RoomAccess): Room {
+  return {
+    id: String(access.id),
+    name: access.room_name,
+    host: access.host_name,
+    initials: playerInitials(access.host_name),
+    elo: 1200,
+    seconds: access.timer_seconds,
+    players: access.player_count,
+    private: !access.is_public,
+    playing: access.status === "playing",
+    spectators: access.allow_spectators,
+    tone: "sage",
+  };
 }
 
 export default function App() {
   return (
     <ThemeProvider>
-      <ExperienceProvider><Application /></ExperienceProvider>
+      <ExperienceProvider>
+        <Application />
+      </ExperienceProvider>
     </ThemeProvider>
-  )
+  );
 }
 
 function Application() {
-  const { setTheme } = useTheme()
-  const { reducedMotion, settings, profile, setDemoName: setUsername } = useExperience()
-  const username = profile.name
-  const profileTone = profile.tone
-  const [page, setPage] = useState<Page>(pageFromHash)
-  const [modal, setModal] = useState<ModalName>(null)
-  const [signedIn, setSignedIn] = useState(true)
-  const [roomList, setRoomList] = useState(rooms)
-  const [activeRoom, setActiveRoom] = useState(rooms[0])
-  const [isHost, setIsHost] = useState(false)
+  const { setTheme } = useTheme();
+  const { reducedMotion, settings, profile, setDemoName: setUsername } = useExperience();
+  const username = profile.name;
+  const profileTone = profile.tone;
+  const socketRpc = useMemo(() => new WebSocketRpcClient(), []);
+  const [authToken, setAuthTokenState] = useState(
+    () => sessionStorage.getItem("co-tuong-access-token") || "",
+  );
+  const [page, setPage] = useState<Page>(pageFromHash);
+  const [modal, setModal] = useState<ModalName>(null);
+  const [signedIn, setSignedInState] = useState(Boolean(authToken));
+  const [roomList, setRoomList] = useState<Room[]>([]);
+  const [roomAccess, setRoomAccessState] = useState<RoomAccess | null>(loadStoredRoomAccess);
+  const [activeRoom, setActiveRoom] = useState<Room>(() =>
+    roomAccess
+      ? roomViewFromAccess(roomAccess)
+      : {
+          id: "0",
+          name: "Chưa chọn phòng",
+          host: "Kỳ hữu",
+          initials: "KH",
+          elo: 1200,
+          seconds: 30,
+          players: 0,
+          spectators: true,
+          tone: "sage",
+        },
+  );
+  const [isHost, setIsHost] = useState(roomAccess?.role === "player1");
   const [gameConfig, setGameConfig] = useState<GameConfig>({
-    mode: "ai",
-    side: "red",
+    mode: pageFromHash() === "game" && roomAccess ? "online" : "ai",
+    side: roomAccess?.role === "player2" ? "black" : "red",
     difficulty: "medium",
     key: 0,
-  })
-  const [authFlow, setAuthFlow] = useState<"register" | "reset" | "activate">(
-    "register",
-  )
-  const [authEmail, setAuthEmail] = useState("")
-  const [selectedRecord, setSelectedRecord] = useState(gameHistory[0])
+    spectator: roomAccess?.role === "spectator",
+  });
+  const [authFlow, setAuthFlow] = useState<"register" | "reset" | "activate">("register");
+  const [authEmail, setAuthEmail] = useState("");
+  const [selectedRecord, setSelectedRecord] = useState(gameHistory[0]);
   const [notification, setNotification] = useState<{
-    message: string
-    type: "success" | "error" | "info"
-    key: number
-  } | null>(null)
-  const [mobileNav, setMobileNav] = useState(false)
-  const [profileMenu, setProfileMenu] = useState(false)
-  const [bellMenu, setBellMenu] = useState(false)
+    message: string;
+    type: "success" | "error" | "info";
+    key: number;
+  } | null>(null);
+  const [mobileNav, setMobileNav] = useState(false);
+  const [profileMenu, setProfileMenu] = useState(false);
+  const [bellMenu, setBellMenu] = useState(false);
   useEffect(() => {
-    setTheme("light")
-  }, [])
+    setTheme("light");
+  }, []);
+  useEffect(() => () => socketRpc.close(), [socketRpc]);
+  useEffect(() => {
+    let cancelled = false;
+    void socketRpc
+      .request<
+        Array<{
+          id: number;
+          room_name: string;
+          host_name: string;
+          timer_seconds: number;
+          player_count: number;
+          is_public: boolean;
+          allow_spectators: boolean;
+          status: string;
+        }>
+      >("room.list")
+      .then((rooms) => {
+        if (cancelled) return;
+        setRoomList(
+          rooms.map((room) => ({
+            id: String(room.id),
+            name: room.room_name,
+            host: room.host_name,
+            initials: playerInitials(room.host_name),
+            elo: 1200,
+            seconds: room.timer_seconds as 15 | 30 | 60,
+            players: room.player_count,
+            private: !room.is_public,
+            playing: room.status === "playing",
+            spectators: room.allow_spectators,
+            tone: "sage",
+          })),
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [socketRpc]);
   useEffect(() => {
     const onHash = () => {
-      setPage(pageFromHash())
-      setModal(null)
-      setMobileNav(false)
-      document.querySelector(".main-scroll")?.scrollTo({ top: 0 })
-    }
-    window.addEventListener("hashchange", onHash)
-    return () => window.removeEventListener("hashchange", onHash)
-  }, [])
+      setPage(pageFromHash());
+      setModal(null);
+      setMobileNav(false);
+      document.querySelector(".main-scroll")?.scrollTo({ top: 0 });
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   useEffect(() => {
-    if (!notification) return
-    const timer = setTimeout(() => setNotification(null), 4300)
-    return () => clearTimeout(timer)
-  }, [notification])
+    const match = /^\/room\/([0-9]+)\/?$/.exec(window.location.pathname);
+    if (!match) return;
+    let cancelled = false;
+    const inviteToken = new URLSearchParams(window.location.search).get("token");
+    void socketRpc
+      .request<RoomAccess>("room.join", {
+        room_id: Number(match[1]),
+        invite_token: inviteToken || undefined,
+      })
+      .then((access) => {
+        if (!cancelled) acceptRoomAccess(access);
+      })
+      .catch((error) => {
+        if (!cancelled)
+          notify(
+            error instanceof Error ? error.message : "Không thể vào phòng từ liên kết mời.",
+            "error",
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   useEffect(() => {
-    document.title = `${pageNames[page]} · Kỳ Tiên Hội`
-    setProfileMenu(false)
-    setBellMenu(false)
-  }, [page])
+    if (!notification) return;
+    const timer = setTimeout(() => setNotification(null), 4300);
+    return () => clearTimeout(timer);
+  }, [notification]);
+  useEffect(() => {
+    document.title = `${pageNames[page]} · Kỳ Tiên Hội`;
+    setProfileMenu(false);
+    setBellMenu(false);
+  }, [page]);
   function go(next: Page) {
-    setPage(next)
-    setMobileNav(false)
-    setModal(null)
-    setProfileMenu(false)
-    setBellMenu(false)
-    window.location.hash = slugs[next]
-    document
-      .querySelector(".main-scroll")
-      ?.scrollTo({ top: 0, behavior: "instant" })
+    setPage(next);
+    setMobileNav(false);
+    setModal(null);
+    setProfileMenu(false);
+    setBellMenu(false);
+    window.location.hash = slugs[next];
+    document.querySelector(".main-scroll")?.scrollTo({ top: 0, behavior: "instant" });
   }
-  function notify(
-    message: string,
-    type: "success" | "error" | "info" = "success",
-  ) {
-    setNotification({ message, type, key: Date.now() })
+  function notify(message: string, type: "success" | "error" | "info" = "success") {
+    setNotification({ message, type, key: Date.now() });
+  }
+  function setAuthToken(token: string) {
+    setAuthTokenState(token);
+    setSignedInState(Boolean(token));
+    if (token) sessionStorage.setItem("co-tuong-access-token", token);
+    else sessionStorage.removeItem("co-tuong-access-token");
+  }
+  function setSignedIn(value: boolean) {
+    setSignedInState(value);
+    if (!value) setAuthToken("");
+  }
+  function setRoomAccess(access: RoomAccess | null) {
+    setRoomAccessState(access);
+    if (access) sessionStorage.setItem("co-tuong-room-access", JSON.stringify(access));
+    else sessionStorage.removeItem("co-tuong-room-access");
+  }
+  function roomFromAccess(access: RoomAccess): Room {
+    return roomViewFromAccess(access);
+  }
+  function acceptRoomAccess(access: RoomAccess) {
+    setRoomAccess(access);
+    const actualRoom = roomFromAccess(access);
+    setActiveRoom(actualRoom);
+    setIsHost(access.role === "player1");
+    if (access.status === "playing") {
+      setGameConfig((config) => ({
+        ...config,
+        mode: "online",
+        side: access.role === "player2" ? "black" : "red",
+        spectator: access.role === "spectator",
+        key: config.key + 1,
+      }));
+      go("game");
+    } else go("waiting");
+  }
+  async function enterRoom(room: Room, options: { password?: string; invite_token?: string } = {}) {
+    const roomId = Number(room.id);
+    if (!Number.isSafeInteger(roomId) || roomId <= 0) {
+      notify("Mã phòng không hợp lệ.", "error");
+      return;
+    }
+    try {
+      const access = await socketRpc.request<RoomAccess>("room.join", {
+        room_id: roomId,
+        ...options,
+      });
+      acceptRoomAccess(access);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Không thể vào phòng.", "error");
+    }
   }
   function joinRoom(room: Room) {
     if (room.playing && !room.spectators) {
-      notify("Phòng đã đủ người và không cho phép khán giả.", "error")
-      return
+      notify("Phòng đã đủ người và không cho phép khán giả.", "error");
+      return;
     }
-    setActiveRoom(room)
-    setIsHost(Boolean(room.ownedByMe))
-    if (room.private) setModal("password")
-    else go("waiting")
+    setActiveRoom(room);
+    setIsHost(Boolean(room.ownedByMe));
+    if (room.private) setModal("password");
+    else void enterRoom(room);
+  }
+  async function joinRoomWithPassword(password: string) {
+    const roomId = Number(activeRoom.id);
+    if (!Number.isSafeInteger(roomId) || roomId <= 0) {
+      throw new Error("Mã phòng không hợp lệ.");
+    }
+    const access = await socketRpc.request<RoomAccess>("room.join", {
+      room_id: roomId,
+      password,
+    });
+    acceptRoomAccess(access);
+  }
+  async function joinRoomByCode(code: string) {
+    const roomCode = code.trim().replace(/^KD/i, "");
+    try {
+      const access = await socketRpc.request<RoomAccess>("room.join_code", {
+        room_code: roomCode,
+      });
+      acceptRoomAccess(access);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Không thể vào phòng.", "error");
+    }
   }
   function startGame(
     mode: "ai" | "online",
@@ -187,30 +361,34 @@ function Application() {
       difficulty,
       key: config.key + 1,
       spectator,
-    }))
-    go("game")
+    }));
+    go("game");
   }
   function viewRecord(record: GameRecord) {
-    setSelectedRecord(record)
-    go("replay")
+    setSelectedRecord(record);
+    go("replay");
   }
   function roomForProfile(room: Room): Room {
     return room.ownedByMe
       ? { ...room, host: username, initials: playerInitials(username), tone: profileTone }
-      : room
+      : room;
   }
   const context = {
     page,
     go,
     openModal: (next: ModalName) => {
       // A toast from the previous save must not cover the editor's action bar.
-      if (next === "edit") setNotification(null)
-      setModal(next)
+      if (next === "edit") setNotification(null);
+      setModal(next);
     },
     closeModal: () => setModal(null),
     notify,
+    request: <T,>(event: string, data: Record<string, unknown> = {}, timeoutMs?: number) =>
+      socketRpc.request<T>(event, data, timeoutMs),
     signedIn,
     setSignedIn,
+    authToken,
+    setAuthToken,
     username,
     setUsername,
     profileTone,
@@ -218,9 +396,13 @@ function Application() {
     setRoomList,
     activeRoom: roomForProfile(activeRoom),
     setActiveRoom,
+    roomAccess,
+    setRoomAccess,
     isHost,
     setIsHost,
     joinRoom,
+    joinRoomWithPassword,
+    joinRoomByCode,
     gameConfig,
     startGame,
     authFlow,
@@ -229,7 +411,7 @@ function Application() {
     setAuthEmail,
     selectedRecord,
     viewRecord,
-  }
+  };
   const navItems = [
     { page: "home" as Page, label: "Sảnh chính", icon: HomeIcon },
     { page: "ai" as Page, label: "Chơi với máy", icon: Bot },
@@ -237,7 +419,7 @@ function Application() {
     { page: "leaderboard" as Page, label: "Bảng Phong Thần", icon: Trophy },
     { page: "history" as Page, label: "Lịch sử ván đấu", icon: HistoryIcon },
     { page: "profile" as Page, label: "Hồ sơ của tôi", icon: User },
-  ]
+  ];
   const activeNav =
     page === "waiting" || (page === "game" && gameConfig.mode === "online")
       ? "rooms"
@@ -245,29 +427,29 @@ function Application() {
         ? "ai"
         : page === "replay"
           ? "history"
-          : page
+          : page;
   function renderPage(): ReactNode {
     switch (page) {
       case "home":
-        return <Home />
+        return <Home />;
       case "rooms":
-        return <Rooms />
+        return <Rooms />;
       case "ai":
-        return <AISetup />
+        return <AISetup />;
       case "waiting":
-        return <WaitingRoom key={activeRoom.id} />
+        return <WaitingRoom key={activeRoom.id} />;
       case "game":
-        return <Game key={gameConfig.key} />
+        return <Game key={gameConfig.key} />;
       case "history":
-        return <History />
+        return <History />;
       case "replay":
-        return <Replay key={selectedRecord.id} />
+        return <Replay key={selectedRecord.id} />;
       case "leaderboard":
-        return <Leaderboard />
+        return <Leaderboard />;
       case "profile":
-        return <Profile />
+        return <Profile />;
       default:
-        return <Auth />
+        return <Auth />;
     }
   }
   return (
@@ -276,12 +458,7 @@ function Application() {
         className={`app app-page-${page} ${reducedMotion ? "experience-reduced" : ""}`}
         data-motion-preference={settings.motionPreference}
       >
-        {mobileNav && (
-          <div
-            className="mobile-nav-scrim"
-            onClick={() => setMobileNav(false)}
-          />
-        )}
+        {mobileNav && <div className="mobile-nav-scrim" onClick={() => setMobileNav(false)} />}
         <aside className={`sidebar-shell ${mobileNav ? "sidebar-open" : ""}`}>
           <Button
             variant="subtle"
@@ -340,9 +517,7 @@ function Application() {
             {navItems.map(({ page: target, label, icon: Icon, count }, i) => (
               <div key={target} className="nav-item-wrap">
                 {i === 3 && (
-                  <div className="nav-section-label secondary-label">
-                    CỘNG ĐỒNG KỲ THỦ
-                  </div>
+                  <div className="nav-section-label secondary-label">CỘNG ĐỒNG KỲ THỦ</div>
                 )}
                 <SidebarButton
                   icon={
@@ -353,18 +528,14 @@ function Application() {
                     </span>
                   }
                   active={activeNav === target}
-                  className={`sidebar-nav-button ${
-                    activeNav === target ? "nav-active" : ""
-                  }`}
+                  className={`sidebar-nav-button ${activeNav === target ? "nav-active" : ""}`}
                   onClick={() => go(target)}
                   title={label}
                 />
               </div>
             ))}
           </SidebarNavigation>
-          <div className="sidebar-bottom-caption">
-            Tâm tĩnh. Trí sáng. Cờ hay.
-          </div>
+          <div className="sidebar-bottom-caption">Tâm tĩnh. Trí sáng. Cờ hay.</div>
         </aside>
         <div className="workspace">
           <header className="topbar">
@@ -383,9 +554,7 @@ function Application() {
                 {page === "home" && (
                   <>
                     <span className="breadcrumb-divider" />
-                    <span className="breadcrumb-welcome">
-                      Chào mừng trở lại!
-                    </span>
+                    <span className="breadcrumb-welcome">Chào mừng trở lại!</span>
                   </>
                 )}
               </div>
@@ -402,8 +571,8 @@ function Application() {
                   aria-label="Thông báo"
                   className="notification-button"
                   onClick={() => {
-                    setBellMenu((v) => !v)
-                    setProfileMenu(false)
+                    setBellMenu((v) => !v);
+                    setProfileMenu(false);
                   }}
                 />
                 <span className="bell-dot" />
@@ -415,12 +584,8 @@ function Application() {
                         <ShieldCheck size={19} />
                       </span>
                       <div>
-                        <div className="player-name">
-                          Chào mừng đến với Kỳ Tiên Hội
-                        </div>
-                        <div className="muted small">
-                          Một cộng đồng văn minh, một niềm đam mê.
-                        </div>
+                        <div className="player-name">Chào mừng đến với Kỳ Tiên Hội</div>
+                        <div className="muted small">Một cộng đồng văn minh, một niềm đam mê.</div>
                       </div>
                     </div>
                     <div className="notification-item">
@@ -429,9 +594,7 @@ function Application() {
                       </span>
                       <div>
                         <div className="player-name">Sẵn sàng khai cuộc?</div>
-                        <div className="muted small">
-                          Có 24 bàn cờ mẫu để trải nghiệm.
-                        </div>
+                        <div className="muted small">Có 24 bàn cờ mẫu để trải nghiệm.</div>
                         <Button
                           variant="subtle"
                           size="small"
@@ -456,8 +619,8 @@ function Application() {
                     aria-controls={profileMenu ? "account-menu" : undefined}
                     title="Menu tài khoản"
                     onClick={() => {
-                      setProfileMenu((v) => !v)
-                      setBellMenu(false)
+                      setProfileMenu((v) => !v);
+                      setBellMenu(false);
                     }}
                   >
                     <UserAvatar
@@ -488,8 +651,8 @@ function Application() {
                         variant="subtle"
                         iconStart={<Settings size={16} />}
                         onClick={() => {
-                          setProfileMenu(false)
-                          setModal("settings")
+                          setProfileMenu(false);
+                          setModal("settings");
                         }}
                       >
                         Cài đặt
@@ -498,10 +661,10 @@ function Application() {
                         variant="subtle"
                         iconStart={<LogOut size={16} />}
                         onClick={() => {
-                          setSignedIn(false)
-                          setProfileMenu(false)
-                          go("home")
-                          notify("Bạn đang trải nghiệm ở chế độ khách.", "info")
+                          setSignedIn(false);
+                          setProfileMenu(false);
+                          go("home");
+                          notify("Bạn đang trải nghiệm ở chế độ khách.", "info");
                         }}
                       >
                         Đăng xuất
@@ -511,11 +674,7 @@ function Application() {
                 </div>
               ) : (
                 <div className="inline">
-                  <Button
-                    variant="subtle"
-                    size="small"
-                    onClick={() => go("login")}
-                  >
+                  <Button variant="subtle" size="small" onClick={() => go("login")}>
                     Đăng nhập
                   </Button>
                   <Button size="small" onClick={() => go("register")}>
@@ -529,10 +688,7 @@ function Application() {
             <div className="page-container">{renderPage()}</div>
           </main>
         </div>
-        <nav
-          className="mobile-bottom-nav"
-          aria-label="Điều hướng trên điện thoại"
-        >
+        <nav className="mobile-bottom-nav" aria-label="Điều hướng trên điện thoại">
           {[
             { page: "home" as Page, icon: HomeIcon, label: "Sảnh chính" },
             { page: "rooms" as Page, icon: Swords, label: "Sảnh đấu" },
@@ -578,5 +734,5 @@ function Application() {
         )}
       </div>
     </AppContext.Provider>
-  )
+  );
 }

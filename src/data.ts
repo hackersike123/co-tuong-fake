@@ -1,37 +1,50 @@
-import { pieceSymbol, type PieceType } from "./chess/pieces"
-import { INITIAL_DEMO_ELO } from "./ranks"
+import { pieceSymbol, type PieceType } from "./chess/pieces";
+import { INITIAL_DEMO_ELO } from "./ranks";
 
-export type Page = "home" | "rooms" | "ai" | "waiting" | "game" | "history" | "replay" | "leaderboard" | "profile" | "login" | "register" | "forgot" | "otp" | "reset"
+export type Page =
+  | "home"
+  | "rooms"
+  | "ai"
+  | "waiting"
+  | "game"
+  | "history"
+  | "replay"
+  | "leaderboard"
+  | "profile"
+  | "login"
+  | "register"
+  | "forgot"
+  | "otp"
+  | "reset";
 
-export type Side = "red" | "black"
+export type Side = "red" | "black";
 
 export function playerInitials(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (!words.length) return "KH"
-  return (words.length > 1
-    ? `${words[0][0]}${words[words.length - 1][0]}`
-    : words[0].slice(0, 2)
-  ).toUpperCase()
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "KH";
+  return (
+    words.length > 1 ? `${words[0][0]}${words[words.length - 1][0]}` : words[0].slice(0, 2)
+  ).toUpperCase();
 }
 
 export function formatClock(seconds: number): string {
-  const value = Math.max(0, Math.floor(seconds))
-  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`
+  const value = Math.max(0, Math.floor(seconds));
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
 }
 export type Room = {
-  id: string
-  name: string
-  host: string
-  ownedByMe?: boolean
-  initials: string
-  elo: number
-  seconds: number
-  players: number
-  private?: boolean
-  playing?: boolean
-  spectators: boolean
-  tone: string
-}
+  id: string;
+  name: string;
+  host: string;
+  ownedByMe?: boolean;
+  initials: string;
+  elo: number;
+  seconds: number;
+  players: number;
+  private?: boolean;
+  playing?: boolean;
+  spectators: boolean;
+  tone: string;
+};
 
 export const rooms: Room[] = [
   {
@@ -126,19 +139,19 @@ export const rooms: Room[] = [
     spectators: false,
     tone: "rose",
   },
-]
+];
 
 export type RankedPlayer = {
-  name: string
-  username: string
-  initials: string
-  elo: number
-  games: number
-  rate: number
-  tone: string
-  change: number
-  avatarUrl?: string
-}
+  name: string;
+  username: string;
+  initials: string;
+  elo: number;
+  games: number;
+  rate: number;
+  tone: string;
+  change: number;
+  avatarUrl?: string;
+};
 
 export const rankings: RankedPlayer[] = [
   {
@@ -261,22 +274,22 @@ export const rankings: RankedPlayer[] = [
     tone: "rose",
     change: 0,
   },
-]
+];
 
 export type GameRecord = {
-  id: string
-  opponent: string
-  initials: string
-  elo: number
-  result: "win" | "draw" | "loss"
-  change: number
-  date: string
-  day: string
-  time: string
-  duration: string
-  reason: string
-  tone: string
-}
+  id: string;
+  opponent: string;
+  initials: string;
+  elo: number;
+  result: "win" | "draw" | "loss";
+  change: number;
+  date: string;
+  day: string;
+  time: string;
+  duration: string;
+  reason: string;
+  tone: string;
+};
 
 export const gameHistory: GameRecord[] = [
   {
@@ -377,48 +390,42 @@ export const gameHistory: GameRecord[] = [
     reason: "Hết nước đi",
     tone: "blue",
   },
-]
+];
 
-export const resultLabels = { win: "Thắng", draw: "Hòa", loss: "Thua" }
+export const resultLabels = { win: "Thắng", draw: "Hòa", loss: "Thua" };
 
 export function getDemoRankings(elo: number) {
-  return rankings.map((player) => player.username === "MinhAnh" && Number.isFinite(elo)
-    ? { ...player, elo: Math.max(0, Math.floor(elo)) }
-    : player).sort((a, b) => b.elo - a.elo)
+  return rankings
+    .map((player) =>
+      player.username === "MinhAnh" && Number.isFinite(elo)
+        ? { ...player, elo: Math.max(0, Math.floor(elo)) }
+        : player,
+    )
+    .sort((a, b) => b.elo - a.elo);
 }
 
 export type Piece = {
-  id: string
-  side: Side
-  kind: string
-  label: PieceType
-  x: number
-  y: number
-}
+  id: string;
+  side: Side;
+  kind: string;
+  label: PieceType;
+  x: number;
+  y: number;
+};
 export type ChessMove = {
-  pieceId: string
-  fromX: number
-  fromY: number
-  toX: number
-  toY: number
-  notation: string
-  side: Side
-}
+  pieceId: string;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  notation: string;
+  side: Side;
+};
 
 export function initialPieces(): Piece[] {
-  const back: PieceType[] = [
-    "Xe",
-    "Mã",
-    "Tượng",
-    "Sĩ",
-    "Tướng",
-    "Sĩ",
-    "Tượng",
-    "Mã",
-    "Xe",
-  ]
+  const back: PieceType[] = ["Xe", "Mã", "Tượng", "Sĩ", "Tướng", "Sĩ", "Tượng", "Mã", "Xe"];
   return (["black", "red"] as Side[]).flatMap((side) => {
-    const y = side === "red" ? 9 : 0
+    const y = side === "red" ? 9 : 0;
     const pieces: Piece[] = back.map((label, x) => ({
       id: `${side}-${x}`,
       side,
@@ -426,8 +433,8 @@ export function initialPieces(): Piece[] {
       label,
       x,
       y,
-    }))
-    ;[1, 7].forEach((x) =>
+    }));
+    [1, 7].forEach((x) =>
       pieces.push({
         id: `${side}-c${x}`,
         side,
@@ -436,8 +443,8 @@ export function initialPieces(): Piece[] {
         x,
         y: side === "red" ? 7 : 2,
       }),
-    )
-    ;[0, 2, 4, 6, 8].forEach((x) =>
+    );
+    [0, 2, 4, 6, 8].forEach((x) =>
       pieces.push({
         id: `${side}-p${x}`,
         side,
@@ -446,9 +453,51 @@ export function initialPieces(): Piece[] {
         x,
         y: side === "red" ? 6 : 3,
       }),
-    )
-    return pieces
-  })
+    );
+    return pieces;
+  });
+}
+
+const fenPieceTypes: Record<string, PieceType> = {
+  k: "Tướng",
+  a: "Sĩ",
+  b: "Tượng",
+  e: "Tượng",
+  n: "Mã",
+  h: "Mã",
+  r: "Xe",
+  c: "Pháo",
+  p: "Tốt",
+};
+
+export function piecesFromFen(fen: string): Piece[] {
+  const placement = fen.trim().split(/\s+/)[0];
+  const rows = placement?.split("/") || [];
+  if (rows.length !== 10) throw new Error("FEN bàn cờ cần có 10 hàng.");
+  const pieces: Piece[] = [];
+  rows.forEach((row, y) => {
+    let x = 0;
+    for (const code of row) {
+      if (/^[1-9]$/.test(code)) {
+        x += Number(code);
+        continue;
+      }
+      const label = fenPieceTypes[code.toLowerCase()];
+      if (!label || x > 8) throw new Error("FEN bàn cờ không hợp lệ.");
+      const side: Side = code === code.toUpperCase() ? "red" : "black";
+      pieces.push({
+        id: `${side}-${x}-${y}`,
+        side,
+        kind: pieceSymbol(side, label),
+        label,
+        x,
+        y,
+      });
+      x += 1;
+    }
+    if (x !== 9) throw new Error("Mỗi hàng FEN phải có đúng 9 cột.");
+  });
+  return pieces;
 }
 
 export const replayMoves: ChessMove[] = [
@@ -560,4 +609,4 @@ export const replayMoves: ChessMove[] = [
     notation: "M2.3",
     side: "black",
   },
-]
+];

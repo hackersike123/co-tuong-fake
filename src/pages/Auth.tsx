@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react"
-import { Button, Checkbox, InputField } from "@figma/astraui"
+import { useEffect, useState } from "react";
+import { Button, Checkbox, InputField } from "@figma/astraui";
 import {
   AlertCircle,
   ArrowLeft,
@@ -12,9 +12,9 @@ import {
   Mail,
   ShieldCheck,
   User,
-} from "lucide-react"
-import { ChessBoard, Heading } from "../components"
-import { useApp } from "../context"
+} from "lucide-react";
+import { ChessBoard, Heading } from "../components";
+import { useApp } from "../context";
 
 export default function Auth() {
   const {
@@ -24,148 +24,169 @@ export default function Auth() {
     setAuthFlow,
     authEmail,
     setAuthEmail,
-    setSignedIn,
+    setAuthToken,
     setUsername,
     notify,
-  } = useApp()
-  const [name, setName] = useState("")
-  const [email, setEmail] = useState(authEmail)
-  const [password, setPassword] = useState("")
-  const [confirmPassword, setConfirmPassword] = useState("")
-  const [visible, setVisible] = useState(false)
-  const [accepted, setAccepted] = useState(true)
-  const [error, setError] = useState("")
-  const [pending, setPending] = useState(false)
-  const [otp, setOtp] = useState(["", "", "", "", "", ""])
-  const [countdown, setCountdown] = useState(300)
-  const [remember, setRemember] = useState(true)
+    request,
+  } = useApp();
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState(authEmail);
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [visible, setVisible] = useState(false);
+  const [accepted, setAccepted] = useState(true);
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+  const [otp, setOtp] = useState(["", "", "", "", "", ""]);
+  const [countdown, setCountdown] = useState(300);
+  const [remember, setRemember] = useState(true);
   useEffect(() => {
-    setError("")
-    setPassword("")
-    setConfirmPassword("")
-    setPending(false)
+    setError("");
+    setPassword("");
+    setConfirmPassword("");
+    setPending(false);
     if (page === "otp") {
-      setCountdown(300)
-      setOtp(["", "", "", "", "", ""])
+      setCountdown(300);
+      setOtp(["", "", "", "", "", ""]);
     }
-  }, [page])
+  }, [page]);
   useEffect(() => {
-    if (page !== "otp" || countdown <= 0) return
-    const timer = setTimeout(() => setCountdown((n) => n - 1), 1000)
-    return () => clearTimeout(timer)
-  }, [page, countdown])
+    if (page !== "otp" || countdown <= 0) return;
+    const timer = setTimeout(() => setCountdown((n) => n - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [page, countdown]);
   const titles: Record<string, string> = {
     login: "Chào mừng kỳ hữu trở lại",
     register: "Bắt đầu hành trình kỳ thủ",
     forgot: "Quên mật khẩu?",
     otp: "Kiểm tra hộp thư của bạn",
     reset: "Đặt mật khẩu mới",
-  }
+  };
   const descriptions: Record<string, string> = {
     login: "Đăng nhập để tiếp nối những ván cờ hay.",
     register: "Tham gia cộng đồng. Kết nối đam mê. Hoàn toàn miễn phí.",
     forgot: "Đừng lo, chúng tôi sẽ giúp bạn trở lại bàn cờ.",
     otp: "Nhập mã xác minh gồm 6 chữ số đã được gửi đến",
     reset: "Một mật khẩu mạnh để bảo vệ hành trình của bạn.",
-  }
-  function delay(action: () => void) {
-    setPending(true)
-    setError("")
-    setTimeout(() => {
-      setPending(false)
-      action()
-    }, 850)
-  }
-  function submit(e: React.FormEvent) {
-    e.preventDefault()
+  };
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
     if (page === "otp") {
       if (countdown <= 0) {
-        setError("Mã xác minh đã hết hạn. Vui lòng gửi lại mã mới.")
-        return
+        setError("Mã xác minh đã hết hạn. Vui lòng gửi lại mã mới.");
+        return;
       }
       if (otp.join("").length !== 6) {
-        setError("Vui lòng nhập đủ 6 chữ số của mã xác minh.")
-        return
+        setError("Vui lòng nhập đủ 6 chữ số của mã xác minh.");
+        return;
       }
-      delay(() => {
-        if (authFlow === "reset") go("reset")
-        else {
-          setSignedIn(true)
-          if (name) setUsername(name)
-          notify("Xác minh thành công. Chào mừng bạn đến với Kỳ Tiên Hội!")
-          go("home")
+      setPending(true);
+      try {
+        if (authFlow === "reset") {
+          go("reset");
+        } else {
+          await request("auth.verify_email", { email: authEmail, otp: otp.join("") });
+          setAuthFlow("register");
+          notify("Email đã xác minh. Hãy đăng nhập để tiếp tục.");
+          go("login");
         }
-      })
-      return
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Không thể xác minh mã OTP.");
+      } finally {
+        setPending(false);
+      }
+      return;
     }
     if (page === "reset") {
       if (password.length < 8) {
-        setError("Mật khẩu cần có ít nhất 8 ký tự.")
-        return
+        setError("Mật khẩu cần có ít nhất 8 ký tự.");
+        return;
       }
       if (password !== confirmPassword) {
-        setError("Hai mật khẩu chưa trùng khớp. Vui lòng kiểm tra lại.")
-        return
+        setError("Hai mật khẩu chưa trùng khớp. Vui lòng kiểm tra lại.");
+        return;
       }
-      delay(() => {
-        notify("Đã đặt mật khẩu mới. Bạn có thể đăng nhập ngay.")
-        go("login")
-      })
-      return
+      setPending(true);
+      try {
+        await request("auth.reset_password", {
+          email: authEmail,
+          otp: otp.join(""),
+          new_password: password,
+          confirm_password: confirmPassword,
+        });
+        notify("Đã đặt mật khẩu mới. Bạn có thể đăng nhập ngay.");
+        go("login");
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Không thể đặt lại mật khẩu.");
+      } finally {
+        setPending(false);
+      }
+      return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      setError("Vui lòng nhập địa chỉ email hợp lệ.")
-      return
+      setError("Vui lòng nhập địa chỉ email hợp lệ.");
+      return;
     }
     if (page === "forgot") {
-      delay(() => {
-        setAuthEmail(email)
-        setAuthFlow("reset")
-        go("otp")
-      })
-      return
+      setPending(true);
+      try {
+        await request("auth.forgot_password", { email });
+        setAuthEmail(email);
+        setAuthFlow("reset");
+        go("otp");
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Không thể gửi mã đặt lại mật khẩu.");
+      } finally {
+        setPending(false);
+      }
+      return;
     }
     if (page === "register" && name.trim().length < 3) {
-      setError("Tên kỳ thủ cần có ít nhất 3 ký tự.")
-      return
+      setError("Tên kỳ thủ cần có ít nhất 3 ký tự.");
+      return;
     }
     if (password.length < 8) {
-      setError("Mật khẩu cần có ít nhất 8 ký tự.")
-      return
+      setError("Mật khẩu cần có ít nhất 8 ký tự.");
+      return;
     }
     if (page === "register" && !accepted) {
-      setError("Vui lòng đồng ý với quy tắc cộng đồng để tiếp tục.")
-      return
+      setError("Vui lòng đồng ý với quy tắc cộng đồng để tiếp tục.");
+      return;
     }
-    if (page === "login" && email.startsWith("chuakichhoat")) {
-      setError(
-        "Tài khoản chưa được kích hoạt. Vui lòng xác minh email để tiếp tục.",
-      )
-      return
-    }
-    delay(() => {
-      setAuthEmail(email)
+    setPending(true);
+    try {
       if (page === "register") {
-        setAuthFlow("register")
-        if (name) setUsername(name.trim())
-        go("otp")
+        await request("auth.register", {
+          email,
+          password,
+          display_name: name.trim(),
+        });
+        setAuthEmail(email);
+        setAuthFlow("register");
+        go("otp");
       } else {
-        setSignedIn(true)
-        notify(
-          remember
-            ? "Đăng nhập thành công. Tùy chọn ghi nhớ đã được chọn trong bản mẫu."
-            : "Đăng nhập thành công. Chúc bạn có những ván cờ hay!",
-        )
-        go("home")
+        const session = await request<{
+          access_token: string;
+          user: { display_name: string; username?: string | null };
+        }>("auth.login", { identifier: email, password, remember_me: remember });
+        setAuthToken(session.access_token);
+        setUsername(session.user.display_name || session.user.username || email);
+        notify("Đăng nhập thành công. Chúc bạn có những ván cờ hay!");
+        go("home");
       }
-    })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Không thể hoàn tất yêu cầu.");
+    } finally {
+      setPending(false);
+    }
   }
   function updateOtp(index: number, value: string) {
-    if (/\D/.test(value)) return
-    const next = [...otp]
-    next[index] = value.slice(-1)
-    setOtp(next)
-    if (value && index < 5) document.getElementById(`otp-${index + 1}`)?.focus()
+    if (/\D/.test(value)) return;
+    const next = [...otp];
+    next[index] = value.slice(-1);
+    setOtp(next);
+    if (value && index < 5) document.getElementById(`otp-${index + 1}`)?.focus();
   }
   return (
     <div className="auth-page">
@@ -195,14 +216,10 @@ export default function Auth() {
           variant="subtle"
           size="small"
           iconStart={<ArrowLeft size={16} />}
-          onClick={() =>
-            go(page === "login" || page === "register" ? "home" : "login")
-          }
+          onClick={() => go(page === "login" || page === "register" ? "home" : "login")}
           className="back-link"
         >
-          {page === "login" || page === "register"
-            ? "Về sảnh chính"
-            : "Quay lại đăng nhập"}
+          {page === "login" || page === "register" ? "Về sảnh chính" : "Quay lại đăng nhập"}
         </Button>
         <div className="auth-form-icon">
           {page === "otp" ? (
@@ -216,9 +233,7 @@ export default function Auth() {
         <Heading level={1}>{titles[page]}</Heading>
         <div className="muted auth-description">
           {descriptions[page]}
-          {page === "otp" && (
-            <div className="auth-email">{authEmail || "kyhuu@example.com"}</div>
-          )}
+          {page === "otp" && <div className="auth-email">{authEmail || "kyhuu@example.com"}</div>}
         </div>
         <form className="form-stack auth-form" onSubmit={submit} noValidate>
           {page === "register" && (
@@ -236,14 +251,14 @@ export default function Auth() {
           )}
           {["login", "register", "forgot"].includes(page) && (
             <InputField
-              label="Địa chỉ email"
-              aria-label="Địa chỉ email"
+              label={page === "login" ? "Email hoặc tên đăng nhập" : "Địa chỉ email"}
+              aria-label={page === "login" ? "Email hoặc tên đăng nhập" : "Địa chỉ email"}
               prefix={<Mail size={16} />}
               value={email}
               onChange={setEmail}
-              placeholder="ban@example.com"
-              type="email"
-              autoComplete="email"
+              placeholder={page === "login" ? "email hoặc username" : "ban@example.com"}
+              type={page === "login" ? "text" : "email"}
+              autoComplete={page === "login" ? "username" : "email"}
               required
             />
           )}
@@ -268,9 +283,7 @@ export default function Auth() {
               onChange={setPassword}
               placeholder="Ít nhất 8 ký tự"
               type={visible ? "text" : "password"}
-              autoComplete={
-                page === "login" ? "current-password" : "new-password"
-              }
+              autoComplete={page === "login" ? "current-password" : "new-password"}
               required
             />
           )}
@@ -303,21 +316,14 @@ export default function Auth() {
                     autoComplete={i === 0 ? "one-time-code" : "off"}
                     onKeyDown={(e) => {
                       if (e.key === "Backspace" && !digit && i > 0)
-                        document.getElementById(`otp-${i - 1}`)?.focus()
+                        document.getElementById(`otp-${i - 1}`)?.focus();
                     }}
                     onPaste={(e) => {
-                      const text = e.clipboardData
-                        .getData("text")
-                        .replace(/\D/g, "")
-                        .slice(0, 6)
+                      const text = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
                       if (text) {
-                        e.preventDefault()
-                        setOtp(
-                          Array.from({ length: 6 }, (_, n) => text[n] || ""),
-                        )
-                        document
-                          .getElementById(`otp-${Math.min(text.length, 5)}`)
-                          ?.focus()
+                        e.preventDefault();
+                        setOtp(Array.from({ length: 6 }, (_, n) => text[n] || ""));
+                        document.getElementById(`otp-${Math.min(text.length, 5)}`)?.focus();
                       }
                     }}
                   />
@@ -328,10 +334,7 @@ export default function Auth() {
                 {countdown > 0
                   ? `Mã có hiệu lực trong ${Math.floor(countdown / 60)
                       .toString()
-                      .padStart(
-                        2,
-                        "0",
-                      )}:${(countdown % 60).toString().padStart(2, "0")}`
+                      .padStart(2, "0")}:${(countdown % 60).toString().padStart(2, "0")}`
                   : "Mã đã hết hạn"}
               </div>
             </>
@@ -339,7 +342,7 @@ export default function Auth() {
           {page === "login" && (
             <div className="between login-options">
               <Checkbox
-                label="Ghi nhớ đăng nhập"
+                label="Giữ phiên đăng nhập trong tab này"
                 defaultChecked
                 onChange={setRemember}
               />
@@ -372,11 +375,7 @@ export default function Auth() {
             className="button-full auth-submit"
             disabled={pending}
             iconEnd={
-              pending ? (
-                <Loader2 size={17} className="animate-spin" />
-              ) : (
-                <ArrowRight size={17} />
-              )
+              pending ? <Loader2 size={17} className="animate-spin" /> : <ArrowRight size={17} />
             }
           >
             {pending
@@ -402,13 +401,24 @@ export default function Auth() {
               size="small"
               className="text-link"
               disabled={countdown > 270 || pending}
-              onClick={() =>
-                delay(() => {
-                  setCountdown(300)
-                  setOtp(["", "", "", "", "", ""])
-                  notify("Đã gửi lại mã xác minh mẫu.")
-                })
-              }
+              onClick={async () => {
+                setPending(true);
+                setError("");
+                try {
+                  if (authFlow === "reset") {
+                    await request("auth.forgot_password", { email: authEmail });
+                  } else {
+                    await request("auth.resend_verification", { email: authEmail });
+                  }
+                  setCountdown(300);
+                  setOtp(["", "", "", "", "", ""]);
+                  notify("Mã xác minh mới đã được gửi qua email.");
+                } catch (cause) {
+                  setError(cause instanceof Error ? cause.message : "Không thể gửi lại mã.");
+                } finally {
+                  setPending(false);
+                }
+              }}
             >
               {pending
                 ? "Đang gửi..."
@@ -436,9 +446,9 @@ export default function Auth() {
               size="small"
               className="activation-link"
               onClick={() => {
-                setAuthEmail(email || "kyhuu@example.com")
-                setAuthFlow("activate")
-                go("otp")
+                setAuthEmail(email || "kyhuu@example.com");
+                setAuthFlow("activate");
+                go("otp");
               }}
             >
               Tài khoản chưa kích hoạt? Xác minh email
@@ -448,12 +458,7 @@ export default function Auth() {
         {page === "register" && (
           <div className="auth-switch">
             Đã là kỳ hữu?{" "}
-            <Button
-              variant="subtle"
-              size="small"
-              className="text-link"
-              onClick={() => go("login")}
-            >
+            <Button variant="subtle" size="small" className="text-link" onClick={() => go("login")}>
               Đăng nhập
             </Button>
           </div>
@@ -462,11 +467,11 @@ export default function Auth() {
           <ShieldCheck size={14} />
           <span>
             {page === "otp"
-              ? "Bản mẫu: nhập 6 chữ số bất kỳ để trải nghiệm."
-              : "Bản mẫu giao diện. Không lưu hoặc gửi thông tin tài khoản."}
+              ? "Mã được gửi qua email và hết hạn sau 5 phút."
+              : "Thông tin tài khoản được gửi tới backend qua WebSocket."}
           </span>
         </div>
       </section>
     </div>
-  )
+  );
 }

@@ -1,9 +1,35 @@
 # Kỳ Tiên Hội — Frontend và Backend
 
-Repository này gồm giao diện React/Vite trong `src/` và API FastAPI trong `app/`.
-Frontend hiện vẫn là prototype: các luồng đăng nhập, phòng, chat, ghép trận và
-nước đi được mô phỏng trong trình duyệt. Chạy backend không tự động kết nối UI;
-`src/config/connection.ts` giữ kết nối ở chế độ demo.
+Repository này gồm giao diện React/Vite trong `src/` và backend FastAPI trong
+`app/`. Frontend gửi lệnh tài khoản, phòng và PvE qua raw WebSocket; lobby và
+ván PvP nhận snapshot, nước đi và timer qua các WebSocket chuyên biệt. Các HTTP
+route hiện có vẫn được giữ để tương thích với client cũ. `/api/health` và trang
+OpenAPI tiếp tục dùng HTTP.
+
+## WebSocket client protocol
+
+Đặt `VITE_API_BASE_URL` trong `.env` (mặc định `http://127.0.0.1:8000`). Các
+lệnh tài khoản/phòng/PvE dùng `ws(s)://<backend>/api/v1/ws` theo dạng:
+
+```json
+{
+  "id": "request-1",
+  "event": "room.create",
+  "data": { "room_name": "Bàn cờ", "host_name": "Kỳ hữu" }
+}
+```
+
+Server trả về cùng `id`, `event` kết thúc bằng `.result`, `ok` và `data` hoặc
+`error`. Lobby dùng `/api/v1/rooms/ws`; trận PvP dùng
+`/api/v1/rooms/{room_id}/ws?participant_token=...`. Nước đi PvP và đồng hồ được
+xác thực/phát từ backend. PvE dùng `pve.start`, `pve.player_move` và
+`pve.ai_move` trên RPC WebSocket; backend kiểm tra luật trước khi áp dụng nước
+đi.
+
+GitHub Actions tự chạy toàn bộ Python tests, compile backend, TypeScript
+typecheck và Vite production build cho pull request vào `main` hoặc `developer`.
+Để chặn merge khi test lỗi, bật branch protection cho `main` và đặt hai check
+`Backend tests` và `Frontend build and typecheck` làm required status checks.
 
 ## Chạy frontend trên Windows
 
@@ -52,6 +78,7 @@ cách cấu hình chi tiết nằm ở các mục backend bên dưới.
 
    Set `JWT_SECRET` to a random value of at least 32 characters. Configure SMTP
    credentials before trying registration, password reset, or email invitations.
+
 2. Start Redis:
 
    ```powershell
@@ -64,11 +91,119 @@ cách cấu hình chi tiết nằm ở các mục backend bên dưới.
    py -m venv .venv
    .\.venv\Scripts\Activate.ps1
    python -m pip install -r requirements.txt
-   uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+   .\scripts\run-backend.ps1
    ```
 
 To run the automated backend tests, install `requirements-dev.txt` and run
-`pytest` from the repository root.
+`python -m pytest -v` from the repository root.
+
+The Windows runner starts the ASGI entrypoint `app.main:app` with one Uvicorn
+worker, the asyncio loop, and port 8000. Run it from the repository root or use
+the script above; this repository has no separate `Backend` directory.
+
+## Backend on Linux / WSL2
+
+After activating the project's virtual environment and installing
+`requirements.txt`, run:
+
+```bash
+bash scripts/run-backend.sh
+```
+
+This starts the same `app.main:app` ASGI application on `0.0.0.0:8000` with one
+worker and uvloop. The script does not enable autoreload.
+
+## CORS and WebSocket origins
+
+`CORS_ALLOWED_ORIGINS` is a comma-separated list of exact origins. The default
+contains local development origins for Vite and the API demo ports. Set it to
+the exact frontend origin(s) when deploying; wildcard origins are rejected.
+The same allowlist is checked on every WebSocket handshake before its endpoint
+can accept the connection.
+
+## Nginx reverse proxy (local)
+
+The current Compose file runs Redis; FastAPI and Vite remain host processes.
+The Nginx container reaches those host services through `host.docker.internal`
+and listens only on `127.0.0.1:8002` by default. Start Vite with `pnpm dev` on
+port 8443. On Windows, a backend bound only to loopback is not reachable from a
+Docker container; for the local proxy, run the backend with:
+
+```powershell
+$env:UVICORN_HOST = "0.0.0.0"
+.\scripts\run-backend.ps1
+```
+
+Then start Nginx and Redis with `docker compose up -d`, and check its config:
+
+```powershell
+docker compose config
+docker compose exec nginx nginx -t
+docker compose ps
+```
+
+Open <http://127.0.0.1:8002>. If you want the browser's API and WebSocket
+traffic to pass through Nginx instead of connecting directly to port 8000, set
+`VITE_API_BASE_URL=http://127.0.0.1:8002` before starting Vite and restart the
+dev server. The proxy keeps request paths and query strings
+unchanged: `/api`, `/api/*`, and `/ws` go to FastAPI, while all other paths go
+to Vite in development. The current room and PvE WebSockets use
+`/api/v1/rooms/.../ws` and `/api/v1/pve/ws`, so they pass through the `/api`
+location without changing their paths or message formats. `proxy_pass` has no
+URI suffix, which preserves the `/api` prefix. Authorization, cookies, and
+query parameters are forwarded. Access logs use `$uri` instead of `$request`,
+so they omit query-string tokens. `X-Forwarded-For` is replaced with the
+connection address observed by Nginx rather than trusting a client-supplied
+forwarded value. The Uvicorn application logging filter also removes query
+strings from backend access log records.
+
+Nginx uses HTTP/1.1 Upgrade headers and 300-second proxy read/write timeouts.
+The Uvicorn runners set protocol-level WebSocket pings to 20 seconds; browser
+WebSocket clients automatically answer those control-frame pings. The room
+endpoint also retains its existing JSON `ping`/`pong` messages.
+
+In production, set `VITE_API_BASE_URL` to the public HTTPS origin (for example,
+`https://chess.example`) before running `pnpm build`; Vite embeds `VITE_*`
+values in the generated JavaScript, so changing Nginx's runtime environment
+cannot update the URL afterward. Do not use the internal
+`NGINX_BACKEND_UPSTREAM` value here. `pnpm build` emits static files to `dist/`;
+the production Nginx template serves those files and falls back to `index.html`
+for SPA routes. The repo currently has no Backend or Frontend Compose service,
+so the production upstream must be set to the real FastAPI host/service name.
+No domain or valid certificate is configured in this checkout, so the local
+HTTP configuration is active and HTTPS/WSS has not been claimed as working.
+
+## Nginx HTTPS/WSS setup (when a domain is available)
+
+Production support is prepared in `compose.acme.yaml`, `compose.production.yaml`,
+`compose.certbot.yaml`, and
+`nginx/production-https.conf.template.example`. Compose v2.24.4 or newer is
+required for the production overrides. Keep Let's Encrypt state and the ACME
+webroot outside the repository; `.gitignore` also excludes the conventional
+`letsencrypt/` and `certbot/` folders. Set `NGINX_SERVER_NAME`,
+`NGINX_BACKEND_UPSTREAM`, `CERTBOT_EMAIL`, `LETSENCRYPT_DIR`, and
+`CERTBOT_WEBROOT_DIR` in the ignored `.env` file, using a domain you control
+and the actual Backend upstream. Point DNS at the server and allow inbound TCP
+ports 80 and 443 before issuing a certificate.
+
+Start the temporary HTTP-01 challenge server, issue the certificate, then
+switch to the HTTPS/WSS config:
+
+```bash
+docker compose -f compose.yaml -f compose.acme.yaml up -d nginx
+docker compose -f compose.yaml -f compose.acme.yaml -f compose.certbot.yaml \
+  --profile certbot run --rm --entrypoint sh certbot -c \
+  'certbot certonly --webroot -w /var/www/certbot -d "$CERTBOT_DOMAIN" --email "$CERTBOT_EMAIL" --agree-tos --no-eff-email'
+docker compose -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml up -d nginx
+docker compose -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml exec nginx nginx -t
+```
+
+The production config redirects HTTP to HTTPS, keeps the ACME challenge path
+available, and serves the same API/WebSocket proxy over TLS. Schedule
+`bash scripts/renew-certbot.sh` daily with the host's cron or systemd timer; it
+runs `certbot renew` and reloads Nginx. The certificate request, HTTPS/WSS
+handshake, and renewal flow remain unverified until a real domain resolves to
+the deployment host and a trusted certificate is issued.
 
 The API uses SQLite by default and creates `co_tuong.db` when it starts. Open
 <http://127.0.0.1:8000/docs> to try the endpoints.
@@ -78,12 +213,11 @@ It returns HTTP 200 when all checks are healthy and HTTP 503 with per-service
 status otherwise. Application, WebSocket, and Uvicorn logs are JSON lines on
 stdout; set `LOG_LEVEL` to change the minimum log level.
 
-For production-style multi-worker runs, keep Redis available and start, for
-example, `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4`. This
-project uses native FastAPI WebSockets, so Redis Pub/Sub relays lobby and room
-events between workers while the existing WebSocket protocol stays unchanged.
-SQLite is the local development default; production workers should use a
-shared database through `DATABASE_URL`.
+The supplied runners use one Uvicorn worker. This project uses native FastAPI
+WebSockets, so REST and WebSocket routes share the same ASGI app and port; Redis
+Pub/Sub continues to relay lobby and room events. SQLite is the local
+development default; production deployments should use a shared database
+through `DATABASE_URL`.
 
 ## Xiangqi board rules
 

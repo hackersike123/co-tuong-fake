@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react"
-import { Button, InputField, SelectField } from "@figma/astraui"
+import { useEffect, useState } from "react";
+import { Button, InputField, SelectField } from "@figma/astraui";
 import {
   AlertCircle,
   ArrowRight,
@@ -9,44 +9,110 @@ import {
   RefreshCw,
   Search,
   Users,
-} from "lucide-react"
-import { EmptyState, Heading, OnlineStatus, RoomCard } from "../components"
-import { useApp } from "../context"
-import { ArenaAtmosphere } from "../experience/effects"
-import { DemoMatchmakingNotice } from "../room-demo"
+} from "lucide-react";
+import { EmptyState, Heading, OnlineStatus, RoomCard } from "../components";
+import { useApp } from "../context";
+import { ArenaAtmosphere } from "../experience/effects";
+import { websocketUrl } from "../config/connection";
+import { playerInitials, type Room } from "../data";
+
+type ServerRoom = {
+  id: number;
+  room_id?: number;
+  room_name?: string;
+  name?: string;
+  host_name?: string;
+  is_public?: boolean;
+  allow_spectators?: boolean;
+  status?: string;
+  player_count?: number;
+  timer_seconds?: number;
+};
+
+function mapRoom(source: ServerRoom): Room {
+  const host = source.host_name || "Kỳ hữu";
+  return {
+    id: String(source.id ?? source.room_id ?? ""),
+    name: source.room_name || source.name || "Phòng cờ tướng",
+    host,
+    initials: playerInitials(host),
+    elo: 1200,
+    seconds: source.timer_seconds || 30,
+    players: source.player_count || 1,
+    private: source.is_public === false,
+    playing: source.status === "playing",
+    spectators: source.allow_spectators !== false,
+    tone: "sage",
+  };
+}
 
 export default function Rooms() {
-  const { roomList, openModal, joinRoom, notify } = useApp()
-  const [query, setQuery] = useState("")
-  const [time, setTime] = useState("all")
-  const [code, setCode] = useState("")
-  const [status, setStatus] = useState("all")
-  const [state, setState] = useState("default")
-  const [visible, setVisible] = useState(6)
+  const { roomList, setRoomList, openModal, joinRoomByCode, request } = useApp();
+  const [query, setQuery] = useState("");
+  const [time, setTime] = useState("all");
+  const [code, setCode] = useState("");
+  const [status, setStatus] = useState("all");
+  const [state, setState] = useState("loading");
+  const [visible, setVisible] = useState(6);
   useEffect(() => {
-    if (state !== "loading") return
-    const timer = setTimeout(() => setState("default"), 900)
-    return () => clearTimeout(timer)
-  }, [state])
+    let stopped = false;
+    let socket: WebSocket | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
+    function connect() {
+      socket = new WebSocket(websocketUrl("/api/v1/rooms/ws"));
+      socket.onopen = () => {
+        attempt = 0;
+        if (!stopped) setState("default");
+      };
+      socket.onmessage = (message) => {
+        try {
+          const event = JSON.parse(message.data) as {
+            type?: string;
+            rooms?: ServerRoom[];
+            room?: ServerRoom;
+            room_id?: number;
+          };
+          if (event.type === "rooms.snapshot" && Array.isArray(event.rooms)) {
+            setRoomList(event.rooms.map(mapRoom));
+          } else if (
+            (event.type === "room.created" || event.type === "room.updated") &&
+            event.room
+          ) {
+            const updated = mapRoom(event.room);
+            setRoomList((current) => [
+              updated,
+              ...current.filter((room) => room.id !== updated.id),
+            ]);
+          } else if (event.type === "room.removed" && event.room_id) {
+            setRoomList((current) => current.filter((room) => room.id !== String(event.room_id)));
+          }
+        } catch {
+          setState("error");
+        }
+      };
+      socket.onerror = () => setState("error");
+      socket.onclose = () => {
+        if (stopped) return;
+        setState("error");
+        retryTimer = setTimeout(connect, Math.min(1000 * 2 ** attempt++, 15000));
+      };
+    }
+    connect();
+    return () => {
+      stopped = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      socket?.close(1000, "Lobby page closed");
+    };
+  }, [setRoomList]);
   const filtered = roomList.filter(
     (room) =>
-      `${room.name} ${room.id} ${room.host}`
-        .toLowerCase()
-        .includes(query.toLowerCase()) &&
+      `${room.name} ${room.id} ${room.host}`.toLowerCase().includes(query.toLowerCase()) &&
       (time === "all" || String(room.seconds) === time) &&
-      (status === "all" ||
-        (status === "waiting" ? !room.playing : room.playing)),
-  )
+      (status === "all" || (status === "waiting" ? !room.playing : room.playing)),
+  );
   function quickJoin() {
-    const room = roomList.find(
-      (r) => r.id.toLowerCase() === code.trim().replace("#", "").toLowerCase(),
-    )
-    if (room) joinRoom(room)
-    else
-      notify(
-        "Không tìm thấy mã phòng. Hãy kiểm tra lại mã và thử lần nữa.",
-        "error",
-      )
+    void joinRoomByCode(code);
   }
   return (
     <div className="page-stack rooms-page">
@@ -55,15 +121,9 @@ export default function Rooms() {
         <div>
           <div className="eyebrow">KẾT NỐI KỲ HỮU</div>
           <Heading level={1}>Sảnh đấu</Heading>
-          <div className="muted mt-xs">
-            Khám phá phòng mẫu và thử các vai trò trong bản demo.
-          </div>
-          <DemoMatchmakingNotice />
+          <div className="muted mt-xs">Tham gia các phòng công khai đang chờ đối thủ.</div>
         </div>
-        <Button
-          iconStart={<Plus size={17} />}
-          onClick={() => openModal("create")}
-        >
+        <Button iconStart={<Plus size={17} />} onClick={() => openModal("create")}>
           Tạo phòng mới
         </Button>
       </div>
@@ -73,11 +133,9 @@ export default function Rooms() {
         </span>
         <div className="grow">
           <Heading level={3}>Giao lưu, học hỏi, cùng tiến bộ.</Heading>
-          <div className="small muted">
-            Các phòng và kỳ thủ bên dưới đều là dữ liệu mô phỏng.
-          </div>
+          <div className="small muted">Danh sách được cập nhật trực tiếp qua WebSocket.</div>
         </div>
-        <OnlineStatus>1.248 kỳ hữu · số liệu demo</OnlineStatus>
+        <OnlineStatus>{state === "default" ? "WebSocket trực tuyến" : "Đang kết nối"}</OnlineStatus>
       </div>
       <section className="surface quick-join-panel">
         <div className="inline">
@@ -86,29 +144,25 @@ export default function Rooms() {
           </span>
           <div>
             <Heading level={3}>Đã có lời mời?</Heading>
-            <div className="small muted">Nhập mã để mở một phòng mẫu trong bản demo.</div>
+            <div className="small muted">Nhập mã phòng do bạn bè gửi.</div>
           </div>
         </div>
         <form
           className="quick-join-form"
           onSubmit={(e) => {
-            e.preventDefault()
-            quickJoin()
+            e.preventDefault();
+            quickJoin();
           }}
         >
           <InputField
             aria-label="Mã phòng"
-            placeholder="Nhập mã phòng, ví dụ KD2846"
+            placeholder="Nhập mã phòng, ví dụ 42"
             value={code}
             onChange={setCode}
             maxLength={12}
             required
           />
-          <Button
-            variant="neutral"
-            type="submit"
-            iconEnd={<ArrowRight size={16} />}
-          >
+          <Button variant="neutral" type="submit" iconEnd={<ArrowRight size={16} />}>
             Vào nhanh
           </Button>
         </form>
@@ -120,17 +174,25 @@ export default function Rooms() {
             <span className="count-badge">{filtered.length}</span>
           </div>
           <div className="inline">
-            <OnlineStatus>Dữ liệu demo</OnlineStatus>
+            <OnlineStatus>
+              {state === "default" ? "Đang cập nhật trực tiếp" : "Mất kết nối"}
+            </OnlineStatus>
             <Button
               variant="subtle"
               size="small"
               iconStart={
-                <RefreshCw
-                  size={15}
-                  className={state === "loading" ? "animate-spin" : ""}
-                />
+                <RefreshCw size={15} className={state === "loading" ? "animate-spin" : ""} />
               }
-              onClick={() => setState("loading")}
+              onClick={async () => {
+                setState("loading");
+                try {
+                  const rooms = await request<ServerRoom[]>("room.list");
+                  setRoomList(rooms.map(mapRoom));
+                  setState("default");
+                } catch {
+                  setState("error");
+                }
+              }}
             >
               Làm mới
             </Button>
@@ -157,12 +219,10 @@ export default function Rooms() {
                 key={option.value}
                 variant="subtle"
                 size="small"
-                className={`filter-chip ${
-                  time === option.value ? "active" : ""
-                }`}
+                className={`filter-chip ${time === option.value ? "active" : ""}`}
                 onClick={() => {
-                  setTime(option.value)
-                  setVisible(6)
+                  setTime(option.value);
+                  setVisible(6);
                 }}
               >
                 {option.value !== "all" && <Clock size={13} />}
@@ -181,11 +241,7 @@ export default function Rooms() {
           />
         </div>
         {state === "loading" ? (
-          <div
-            className="room-grid"
-            aria-busy="true"
-            aria-label="Đang tải danh sách phòng"
-          >
+          <div className="room-grid" aria-busy="true" aria-label="Đang tải danh sách phòng">
             {Array.from({ length: 6 }, (_, i) => (
               <div className="room-skeleton" key={i}>
                 <div />
@@ -199,7 +255,7 @@ export default function Rooms() {
           <EmptyState
             icon={<AlertCircle size={28} />}
             title="Chưa thể tải danh sách phòng"
-            description="Đây là trạng thái lỗi mô phỏng; không có kết nối máy chủ."
+            description="Không thể kết nối tới sảnh WebSocket. Hệ thống sẽ tự thử lại."
             action="Thử lại"
             onAction={() => setState("loading")}
           />
@@ -215,11 +271,11 @@ export default function Rooms() {
             action={query ? "Xóa bộ lọc" : "Tạo phòng đầu tiên"}
             onAction={() => {
               if (query) {
-                setQuery("")
-                setTime("all")
-                setStatus("all")
-                setState("default")
-              } else openModal("create")
+                setQuery("");
+                setTime("all");
+                setStatus("all");
+                setState("default");
+              } else openModal("create");
             }}
           />
         ) : (
@@ -231,10 +287,7 @@ export default function Rooms() {
             </div>
             {filtered.length > visible && (
               <div className="load-more">
-                <Button
-                  variant="neutral"
-                  onClick={() => setVisible((n) => n + 6)}
-                >
+                <Button variant="neutral" onClick={() => setVisible((n) => n + 6)}>
                   Xem thêm phòng
                 </Button>
               </div>
@@ -242,28 +295,13 @@ export default function Rooms() {
           </>
         )}
         <div className="list-panel-footer">
-          <span className="small muted">
-            Phòng riêng tư yêu cầu mật khẩu. Phòng đang đấu có thể vào xem.
-          </span>
-          <div className="prototype-state">
-            <span className="small muted">Xem trạng thái:</span>
-            <SelectField
-              options={[
-                { value: "default", label: "Mặc định" },
-                { value: "loading", label: "Đang tải" },
-                { value: "empty", label: "Sảnh trống" },
-                { value: "error", label: "Lỗi tải mẫu (mô phỏng)" },
-              ]}
-              value={state}
-              onChange={setState}
-            />
-          </div>
+          <span className="small muted">Phòng riêng tư cần mật khẩu hoặc liên kết mời.</span>
         </div>
       </section>
     </div>
-  )
+  );
 }
 
 function SwordsIcon() {
-  return <LayoutGrid size={25} strokeWidth={1.5} />
+  return <LayoutGrid size={25} strokeWidth={1.5} />;
 }

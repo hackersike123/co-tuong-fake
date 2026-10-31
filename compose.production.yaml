@@ -1,0 +1,18 @@
+services:
+  nginx:
+    ports: !override
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+    environment:
+      NGINX_SERVER_NAME: "${NGINX_SERVER_NAME:?Set NGINX_SERVER_NAME to a domain you control}"
+      NGINX_BACKEND_UPSTREAM: "${NGINX_BACKEND_UPSTREAM:?Set this to the actual FastAPI host or Compose service and port}"
+      NGINX_TLS_CERTIFICATE: "/etc/letsencrypt/live/${NGINX_SERVER_NAME:?Set NGINX_SERVER_NAME}/fullchain.pem"
+      NGINX_TLS_CERTIFICATE_KEY: "/etc/letsencrypt/live/${NGINX_SERVER_NAME:?Set NGINX_SERVER_NAME}/privkey.pem"
+      NGINX_ENVSUBST_FILTER: "^(NGINX_BACKEND_UPSTREAM|NGINX_SERVER_NAME|NGINX_TLS_CERTIFICATE|NGINX_TLS_CERTIFICATE_KEY)$"
+    volumes: !override
+      - ./nginx/production-https.conf.template.example:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/snippets/proxy-headers.conf:/etc/nginx/snippets/proxy-headers.conf:ro
+      - ./nginx/snippets/proxy-routes.conf:/etc/nginx/snippets/proxy-routes.conf:ro
+      - ./dist:/usr/share/nginx/html:ro
+      - "${LETSENCRYPT_DIR:?Set LETSENCRYPT_DIR outside the repository}:/etc/letsencrypt:ro"
+      - "${CERTBOT_WEBROOT_DIR:?Set CERTBOT_WEBROOT_DIR outside the repository}:/var/www/certbot:ro"

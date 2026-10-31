@@ -13,6 +13,8 @@ class RecordingWebSocket:
     def __init__(self) -> None:
         self.events: list[dict[str, object]] = []
         self.received = asyncio.Event()
+        self.closed = asyncio.Event()
+        self.close_code: int | None = None
 
     async def accept(self) -> None:
         return None
@@ -20,6 +22,10 @@ class RecordingWebSocket:
     async def send_json(self, event: dict[str, object]) -> None:
         self.events.append(event)
         self.received.set()
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        self.close_code = code
+        self.closed.set()
 
 
 def test_room_and_lobby_events_reach_another_worker() -> None:
@@ -69,6 +75,10 @@ def test_room_and_lobby_events_reach_another_worker() -> None:
 
             assert move_event in room_socket.events
             assert lobby_event in lobby_socket.events
+
+            await publisher.revoke_participant(9_876_543, "test-participant")
+            await asyncio.wait_for(room_socket.closed.wait(), timeout=3)
+            assert room_socket.close_code == 4403
         finally:
             await subscriber.disconnect_room(9_876_543, room_socket)
             await subscriber.disconnect_lobby(lobby_socket)
