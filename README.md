@@ -86,11 +86,35 @@ cách cấu hình chi tiết nằm ở các mục backend bên dưới.
    py -m venv .venv
    .\.venv\Scripts\Activate.ps1
    python -m pip install -r requirements.txt
-   uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+   .\scripts\run-backend.ps1
    ```
 
 To run the automated backend tests, install `requirements-dev.txt` and run
-`pytest` from the repository root.
+`python -m pytest -v` from the repository root.
+
+The Windows runner starts the ASGI entrypoint `app.main:app` with one Uvicorn
+worker, the asyncio loop, and port 8000. Run it from the repository root or use
+the script above; this repository has no separate `Backend` directory.
+
+## Backend on Linux / WSL2
+
+After activating the project's virtual environment and installing
+`requirements.txt`, run:
+
+```bash
+bash scripts/run-backend.sh
+```
+
+This starts the same `app.main:app` ASGI application on `0.0.0.0:8000` with one
+worker and uvloop. The script does not enable autoreload.
+
+## CORS and WebSocket origins
+
+`CORS_ALLOWED_ORIGINS` is a comma-separated list of exact origins. The default
+contains local development origins for Vite and the API demo ports. Set it to
+the exact frontend origin(s) when deploying; wildcard origins are rejected.
+The same allowlist is checked on every WebSocket handshake before its endpoint
+can accept the connection.
 
 The API uses SQLite by default and creates `co_tuong.db` when it starts. Open
 <http://127.0.0.1:8000/docs> to try the endpoints.
@@ -100,12 +124,11 @@ It returns HTTP 200 when all checks are healthy and HTTP 503 with per-service
 status otherwise. Application, WebSocket, and Uvicorn logs are JSON lines on
 stdout; set `LOG_LEVEL` to change the minimum log level.
 
-For production-style multi-worker runs, keep Redis available and start, for
-example, `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4`. This
-project uses native FastAPI WebSockets, so Redis Pub/Sub relays lobby and room
-events between workers while the existing WebSocket protocol stays unchanged.
-SQLite is the local development default; production workers should use a
-shared database through `DATABASE_URL`.
+The supplied runners use one Uvicorn worker. This project uses native FastAPI
+WebSockets, so REST and WebSocket routes share the same ASGI app and port; Redis
+Pub/Sub continues to relay lobby and room events. SQLite is the local
+development default; production deployments should use a shared database
+through `DATABASE_URL`.
 
 ## Xiangqi board rules
 
