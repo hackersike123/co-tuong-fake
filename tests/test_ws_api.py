@@ -291,4 +291,3 @@ def test_websocket_rpc_returns_validation_errors_without_echoing_passwords():
         assert response["ok"] is False
         assert response["error"]["status"] == 422
         assert "secret" not in str(response["error"])
-
