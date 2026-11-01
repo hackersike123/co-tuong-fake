@@ -18,10 +18,10 @@ export const PIECE_SYMBOLS = {
     Pháo: "砲",
     Tốt: "卒",
   },
-} as const
+} as const;
 
-export type PieceType = keyof typeof PIECE_SYMBOLS.red
+export type PieceType = keyof typeof PIECE_SYMBOLS.red;
 
 export function pieceSymbol(side: keyof typeof PIECE_SYMBOLS, type: PieceType) {
-  return PIECE_SYMBOLS[side][type]
+  return PIECE_SYMBOLS[side][type];
 }

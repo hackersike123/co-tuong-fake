@@ -1,5 +1,9 @@
-"""Authorization for reading room metadata and live game state."""
+"""Authorization for room details, live state, and saved room history."""
 
+import hashlib
+import json
+import secrets
+from collections.abc import Sequence
 from typing import Literal
 
 from fastapi import HTTPException, status
@@ -8,6 +12,11 @@ from .room_store import get_participant_role, get_room_password_hash, is_valid_i
 from .security import verify_password
 
 RoomReadAction = Literal["read_room", "read_game_state", "read_game_history"]
+
+
+def hash_room_token(token: str) -> str:
+    """Hash a room bearer token before persisting it with match history."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def _unauthorized() -> HTTPException:
@@ -70,5 +79,52 @@ def authorize_room_access(
             return "public"
         if room["allow_spectators"]:
             return "spectator"
+
+    raise _unauthorized()
+
+
+def authorize_archived_room_history(
+    matches: Sequence[object],
+    *,
+    participant_token: str | None = None,
+) -> list[object]:
+    """Authorize history after the Redis room has been removed.
+
+    Match records retain only hashes of credentials that were valid in that
+    room. Historical access is read-only and never authorizes live room access.
+    """
+    if participant_token:
+        digest = hash_room_token(participant_token)
+        authorized_matches: list[object] = []
+        for match in matches:
+            try:
+                token_roles = json.loads(getattr(match, "access_token_hashes", "{}"))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(token_roles, dict):
+                continue
+            role_for_match: str | None = None
+            for stored_hash, role in token_roles.items():
+                if isinstance(stored_hash, str) and secrets.compare_digest(stored_hash, digest):
+                    role_for_match = str(role)
+                    break
+            if role_for_match in {"player1", "player2"} or (
+                role_for_match == "spectator"
+                and bool(getattr(match, "allow_spectators", False))
+            ):
+                authorized_matches.append(match)
+        if authorized_matches:
+            return authorized_matches
+        raise _forbidden()
+
+    public_matches = [
+        match
+        for match in matches
+        if bool(getattr(match, "is_public", False))
+        and not bool(getattr(match, "has_password", False))
+        and bool(getattr(match, "allow_spectators", False))
+    ]
+    if public_matches:
+        return public_matches
 
     raise _unauthorized()

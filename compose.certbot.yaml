@@ -1,0 +1,11 @@
+services:
+  certbot:
+    image: certbot/certbot:latest
+    profiles:
+      - certbot
+    environment:
+      CERTBOT_DOMAIN: "${NGINX_SERVER_NAME:-}"
+      CERTBOT_EMAIL: "${CERTBOT_EMAIL:-}"
+    volumes:
+      - "${LETSENCRYPT_DIR:?Set LETSENCRYPT_DIR outside the repository}:/etc/letsencrypt"
+      - "${CERTBOT_WEBROOT_DIR:?Set CERTBOT_WEBROOT_DIR outside the repository}:/var/www/certbot"

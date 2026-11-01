@@ -1,12 +1,12 @@
-@import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;450;500;600&display=swap');
-@import 'tailwindcss';
-@import '@figma/astraui/styles.css';
-@import '../styles/global.css';
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;450;500;600&display=swap");
+@import "tailwindcss";
+@import "@figma/astraui/styles.css";
+@import "../styles/global.css";
 
 /* Locally hosted CJK subset; only piece faces use this CSS-defined font. */
 @font-face {
-  font-family: 'Noto Serif TC';
-  src: url('/fonts/noto-serif-tc-xiangqi.ttf') format('truetype');
+  font-family: "Noto Serif TC";
+  src: url("/fonts/noto-serif-tc-xiangqi.ttf") format("truetype");
   font-style: normal;
   font-weight: 600;
   font-display: swap;
@@ -28,6 +28,6 @@
   --spacing-2xl: var(--space-2xl);
   --radius-corner-md: var(--corner-md);
   --radius-corner-lg: var(--corner-lg);
-  --font-sans: 'Instrument Sans', system-ui, sans-serif;
-  --font-display: 'Instrument Sans', system-ui, sans-serif;
+  --font-sans: "Instrument Sans", system-ui, sans-serif;
+  --font-display: "Instrument Sans", system-ui, sans-serif;
 }

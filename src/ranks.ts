@@ -1,4 +1,4 @@
-/** Product-specific demo thresholds, not an official Xiangqi rating standard. */
+/** Kỳ Tiên Hội's own cultivation tiers; these are not a Xiangqi rating standard. */
 export const CULTIVATION_RANKS = [
   { name: "Phàm Nhân", minElo: 0 },
   { name: "Luyện Khí", minElo: 1000 },
@@ -13,34 +13,40 @@ export const CULTIVATION_RANKS = [
   { name: "Chân Tiên", minElo: 2800 },
   { name: "Kim Tiên", minElo: 3000 },
   { name: "Tiên Đế", minElo: 3200 },
-] as const
+] as const;
 
-export const CULTIVATION_LAYERS = 3
-export const INITIAL_DEMO_ELO = 1250
+export const CULTIVATION_LAYERS = 3;
+export const INITIAL_ELO = 1000;
+
+export function resolveDisplayedElo({
+  current,
+  signedIn,
+  currentElo,
+  playerElo,
+}: {
+  current: boolean;
+  signedIn: boolean;
+  currentElo?: number | null;
+  playerElo?: number | null;
+}): number | null {
+  const rating = current ? (signedIn ? currentElo : null) : playerElo;
+  return typeof rating === "number" && Number.isFinite(rating) ? rating : null;
+}
 
 export function getCultivationRank(value: number) {
-  const elo = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0
-  let index = 0
+  const elo = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  let index = 0;
   CULTIVATION_RANKS.forEach((rank, i) => {
-    if (elo >= rank.minElo) index = i
-  })
-  const realm = CULTIVATION_RANKS[index]
-  const next = CULTIVATION_RANKS[index + 1]
+    if (elo >= rank.minElo) index = i;
+  });
+  const realm = CULTIVATION_RANKS[index];
+  const next = CULTIVATION_RANKS[index + 1];
   const progress = next
-    ? Math.min(
-        100,
-        Math.max(
-          0,
-          ((elo - realm.minElo) / (next.minElo - realm.minElo)) * 100,
-        ),
-      )
-    : 100
+    ? Math.min(100, Math.max(0, ((elo - realm.minElo) / (next.minElo - realm.minElo)) * 100))
+    : 100;
   const layer = next
-    ? Math.min(
-        CULTIVATION_LAYERS,
-        Math.floor((progress / 100) * CULTIVATION_LAYERS) + 1,
-      )
-    : Math.min(CULTIVATION_LAYERS, Math.floor((elo - realm.minElo) / 100) + 1)
+    ? Math.min(CULTIVATION_LAYERS, Math.floor((progress / 100) * CULTIVATION_LAYERS) + 1)
+    : Math.min(CULTIVATION_LAYERS, Math.floor((elo - realm.minElo) / 100) + 1);
   return {
     ...realm,
     index,
@@ -50,5 +56,5 @@ export function getCultivationRank(value: number) {
     layer,
     remaining: next ? Math.max(0, next.minElo - elo) : 0,
     label: `${realm.name} · tầng ${layer}`,
-  }
+  };
 }

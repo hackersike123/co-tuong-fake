@@ -1,14 +1,14 @@
-import { Avatar } from "@figma/astraui"
-import { useExperience } from "./Experience"
-import { playerInitials } from "../data"
+import { Avatar } from "@figma/astraui";
+import { useExperience } from "./Experience";
+import { playerInitials } from "../data";
 
-export type PodiumRank = 1 | 2 | 3
+export type PodiumRank = 1 | 2 | 3;
 
 const PODIUM_FRAMES = {
   1: { name: "khung-vip-314-v2", size: 244 },
   2: { name: "khung-vip-moc-3", size: 180 },
   3: { name: "khung-vip-moc-4", size: 180 },
-} as const
+} as const;
 
 export function PodiumAvatar({
   rank,
@@ -19,23 +19,23 @@ export function PodiumAvatar({
   current,
   compact = false,
 }: {
-  rank: PodiumRank
-  name: string
-  initials: string
-  tone: string
-  avatarUrl?: string
-  current: boolean
-  compact?: boolean
+  rank: PodiumRank;
+  name: string;
+  initials: string;
+  tone: string;
+  avatarUrl?: string;
+  current: boolean;
+  compact?: boolean;
 }) {
-  const { avatar, reducedMotion, settings, profile } = useExperience()
-  const image = current ? avatar : avatarUrl
-  const displayName = current ? profile.name : name
-  const displayInitials = current ? playerInitials(profile.name) : initials
-  const displayTone = current ? profile.tone : tone
-  const frame = PODIUM_FRAMES[rank]
-  const animate = !reducedMotion && settings.effects
+  const { avatar, reducedMotion, settings, profile } = useExperience();
+  const image = current ? avatar : avatarUrl;
+  const displayName = current ? profile.name : name;
+  const displayInitials = current ? playerInitials(profile.name) : initials;
+  const displayTone = current ? profile.tone : tone;
+  const frame = PODIUM_FRAMES[rank];
+  const animate = !reducedMotion && settings.effects;
   // CSS cannot pause an animated WebP; the lossless first frame keeps its alpha.
-  const extension = animate ? ".webp" : "-still.png"
+  const extension = animate ? ".webp" : "-still.png";
   return (
     <div
       className={`podium-avatar vip-frame-${rank} ${
@@ -78,5 +78,5 @@ export function PodiumAvatar({
         )}
       </div>
     </div>
-  )
+  );
 }

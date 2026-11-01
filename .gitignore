@@ -1,5 +1,6 @@
 .venv/
 node_modules/
+.pnpm-store/
 dist/
 build/
 .cache/
@@ -10,12 +11,18 @@ __pycache__/
 *.db
 .env*
 !.env.example
+!.env.example.en
+!.env.local.example
+!.env.staging.example
+!.env.production.example
 *.tsbuildinfo
 *-debug.log*
 logs/
 *.log
 .claude-replay.*
 .tmp-*
+/letsencrypt/
+/certbot/
 /.figma/design-context/
 /.plugins/
 /.opencode-skills/

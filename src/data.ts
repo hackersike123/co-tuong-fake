@@ -1,424 +1,200 @@
-import { pieceSymbol, type PieceType } from "./chess/pieces"
-import { INITIAL_DEMO_ELO } from "./ranks"
+import { pieceSymbol, type PieceType } from "./chess/pieces";
 
-export type Page = "home" | "rooms" | "ai" | "waiting" | "game" | "history" | "replay" | "leaderboard" | "profile" | "login" | "register" | "forgot" | "otp" | "reset"
+export type Page =
+  | "home"
+  | "rooms"
+  | "ai"
+  | "waiting"
+  | "game"
+  | "history"
+  | "replay"
+  | "leaderboard"
+  | "profile"
+  | "login"
+  | "register"
+  | "forgot"
+  | "otp"
+  | "reset";
 
-export type Side = "red" | "black"
+export type Side = "red" | "black";
 
 export function playerInitials(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (!words.length) return "KH"
-  return (words.length > 1
-    ? `${words[0][0]}${words[words.length - 1][0]}`
-    : words[0].slice(0, 2)
-  ).toUpperCase()
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "KH";
+  return (
+    words.length > 1 ? `${words[0][0]}${words[words.length - 1][0]}` : words[0].slice(0, 2)
+  ).toUpperCase();
 }
 
 export function formatClock(seconds: number): string {
-  const value = Math.max(0, Math.floor(seconds))
-  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`
+  const value = Math.max(0, Math.floor(seconds));
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
 }
+
 export type Room = {
-  id: string
-  name: string
-  host: string
-  ownedByMe?: boolean
-  initials: string
-  elo: number
-  seconds: number
-  players: number
-  private?: boolean
-  playing?: boolean
-  spectators: boolean
-  tone: string
+  id: string;
+  roomCode?: string;
+  name: string;
+  host: string;
+  ownedByMe?: boolean;
+  initials: string;
+  elo?: number | null;
+  seconds: number;
+  players: number;
+  private?: boolean;
+  playing?: boolean;
+  spectators: boolean;
+  tone: string;
+  player2Name?: string | null;
+  player2Elo?: number | null;
+};
+
+export function mergeRoomSummary(room: Room, summary: Record<string, unknown>): Room {
+  const hostName = typeof summary.host_name === "string" ? summary.host_name : room.host;
+  const status = summary.status;
+  return {
+    ...room,
+    roomCode: typeof summary.room_code === "string" ? summary.room_code : room.roomCode,
+    name:
+      typeof summary.room_name === "string"
+        ? summary.room_name
+        : typeof summary.name === "string"
+          ? summary.name
+          : room.name,
+    host: hostName,
+    initials: hostName === room.host ? room.initials : playerInitials(hostName),
+    elo:
+      summary.host_elo === null
+        ? null
+        : typeof summary.host_elo === "number"
+          ? summary.host_elo
+          : room.elo,
+    player2Name:
+      summary.player2_name === null
+        ? null
+        : typeof summary.player2_name === "string"
+          ? summary.player2_name
+          : (room.player2Name ?? null),
+    player2Elo:
+      summary.player2_elo === null
+        ? null
+        : typeof summary.player2_elo === "number"
+          ? summary.player2_elo
+          : (room.player2Elo ?? null),
+    players: typeof summary.player_count === "number" ? summary.player_count : room.players,
+    private: typeof summary.is_public === "boolean" ? !summary.is_public : room.private,
+    playing:
+      status === "playing"
+        ? true
+        : status === "waiting" || status === "finished"
+          ? false
+          : room.playing,
+    spectators:
+      typeof summary.allow_spectators === "boolean" ? summary.allow_spectators : room.spectators,
+  };
 }
-
-export const rooms: Room[] = [
-  {
-    id: "KD2846",
-    name: "Giao lưu chiều cuối tuần",
-    host: "ThanhPhong",
-    initials: "TP",
-    elo: 1320,
-    seconds: 30,
-    players: 1,
-    spectators: true,
-    tone: "sage",
-  },
-  {
-    id: "KD1928",
-    name: "Một ván cờ, một người bạn",
-    host: "CoThuSaiGon",
-    initials: "CT",
-    elo: 1450,
-    seconds: 60,
-    players: 1,
-    spectators: true,
-    tone: "sand",
-  },
-  {
-    id: "KD3651",
-    name: "Cờ nhanh – vui là chính",
-    host: "TieuTot",
-    initials: "TT",
-    elo: 1180,
-    seconds: 15,
-    players: 1,
-    spectators: true,
-    tone: "blue",
-  },
-  {
-    id: "KD4712",
-    name: "Kỳ hữu Hà Nội",
-    host: "BachMa",
-    initials: "BM",
-    elo: 1680,
-    seconds: 30,
-    players: 1,
-    private: true,
-    spectators: true,
-    tone: "rose",
-  },
-  {
-    id: "KD5830",
-    name: "Đại chiến cuối tuần",
-    host: "NgoaLong",
-    initials: "NL",
-    elo: 2140,
-    seconds: 60,
-    players: 2,
-    playing: true,
-    spectators: true,
-    tone: "sage",
-  },
-  {
-    id: "KD6204",
-    name: "Tân thủ cùng tiến bộ",
-    host: "MinhKhai",
-    initials: "MK",
-    elo: 1020,
-    seconds: 60,
-    players: 1,
-    spectators: true,
-    tone: "sand",
-  },
-  {
-    id: "KD7318",
-    name: "Bàn cờ dưới hiên",
-    host: "KySiMuaThu",
-    initials: "KS",
-    elo: 1520,
-    seconds: 30,
-    players: 2,
-    playing: true,
-    spectators: true,
-    tone: "blue",
-  },
-  {
-    id: "KD8465",
-    name: "Hội cờ những người bạn",
-    host: "LamSon",
-    initials: "LS",
-    elo: 1375,
-    seconds: 15,
-    players: 1,
-    private: true,
-    spectators: false,
-    tone: "rose",
-  },
-]
-
-export type RankedPlayer = {
-  name: string
-  username: string
-  initials: string
-  elo: number
-  games: number
-  rate: number
-  tone: string
-  change: number
-  avatarUrl?: string
-}
-
-export const rankings: RankedPlayer[] = [
-  {
-    name: "Ngọa Long",
-    username: "NgoaLong",
-    initials: "NL",
-    elo: 2486,
-    games: 386,
-    rate: 82,
-    tone: "sage",
-    change: 2,
-  },
-  {
-    name: "Độc Cô Cầu Bại",
-    username: "DocCoCauBai",
-    initials: "ĐC",
-    elo: 2412,
-    games: 452,
-    rate: 78,
-    tone: "sand",
-    change: 1,
-  },
-  {
-    name: "Kỳ Vương",
-    username: "KyVuong",
-    initials: "KV",
-    elo: 2358,
-    games: 318,
-    rate: 76,
-    tone: "blue",
-    change: -1,
-  },
-  {
-    name: "Thiên Mã",
-    username: "ThienMa",
-    initials: "TM",
-    elo: 2290,
-    games: 296,
-    rate: 74,
-    tone: "rose",
-    change: 3,
-  },
-  {
-    name: "Bạch Hổ",
-    username: "BachHo",
-    initials: "BH",
-    elo: 2216,
-    games: 270,
-    rate: 72,
-    tone: "sage",
-    change: 0,
-  },
-  {
-    name: "Lâm Sơn",
-    username: "LamSon",
-    initials: "LS",
-    elo: 2168,
-    games: 241,
-    rate: 70,
-    tone: "sand",
-    change: 2,
-  },
-  {
-    name: "Thanh Phong",
-    username: "ThanhPhong",
-    initials: "TP",
-    elo: 2082,
-    games: 216,
-    rate: 69,
-    tone: "blue",
-    change: 1,
-  },
-  {
-    name: "Tĩnh Tâm",
-    username: "TinhTam",
-    initials: "TT",
-    elo: 2040,
-    games: 208,
-    rate: 68,
-    tone: "rose",
-    change: -2,
-  },
-  {
-    name: "Minh Anh",
-    username: "MinhAnh",
-    initials: "MA",
-    elo: INITIAL_DEMO_ELO,
-    games: 48,
-    rate: 65,
-    tone: "sage",
-    change: 5,
-  },
-  {
-    name: "Tiểu Tốt",
-    username: "TieuTot",
-    initials: "TT",
-    elo: 1180,
-    games: 62,
-    rate: 54,
-    tone: "sand",
-    change: 2,
-  },
-  {
-    name: "Minh Khải",
-    username: "MinhKhai",
-    initials: "MK",
-    elo: 1120,
-    games: 38,
-    rate: 52,
-    tone: "blue",
-    change: 1,
-  },
-  {
-    name: "Tân Kỳ",
-    username: "TanKy",
-    initials: "TK",
-    elo: 1080,
-    games: 24,
-    rate: 50,
-    tone: "rose",
-    change: 0,
-  },
-]
 
 export type GameRecord = {
-  id: string
-  opponent: string
-  initials: string
-  elo: number
-  result: "win" | "draw" | "loss"
-  change: number
-  date: string
-  day: string
-  time: string
-  duration: string
-  reason: string
-  tone: string
+  id: number;
+  match_key: string;
+  room_id: number;
+  room_uuid: string;
+  round_number: number;
+  room_name: string;
+  red_player: string;
+  black_player: string;
+  red_user_id: number | null;
+  black_user_id: number | null;
+  result: string;
+  reason: string | null;
+  winner: "w" | "b" | null;
+  notation: string;
+  final_fen: string;
+  finished_at: string;
+  red_elo_change: number;
+  black_elo_change: number;
+};
+
+export type RankedPlayer = {
+  rank: number;
+  user_id: number;
+  username: string | null;
+  display_name: string;
+  elo: number;
+  games_played: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  win_rate: number;
+};
+
+export type PlayerStats = {
+  user_id: number;
+  display_name: string;
+  username: string | null;
+  elo: number;
+  games_played: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  win_rate: number;
+  rank: number | null;
+};
+
+export type CommunitySummary = {
+  registered_players: number;
+  open_public_rooms: number;
+  completed_public_games: number;
+};
+
+export const resultLabels: Record<"win" | "draw" | "loss", string> = {
+  win: "Thắng",
+  draw: "Hòa",
+  loss: "Thua",
+};
+
+export function matchResultForUser(match: GameRecord, userId: number): "win" | "draw" | "loss" {
+  if (match.winner === null) return "draw";
+  const side = match.red_user_id === userId ? "w" : match.black_user_id === userId ? "b" : null;
+  if (!side) return "draw";
+  return match.winner === side ? "win" : "loss";
 }
 
-export const gameHistory: GameRecord[] = [
-  {
-    id: "GD2048",
-    opponent: "ThanhPhong",
-    initials: "TP",
-    elo: 1320,
-    result: "win",
-    change: 16,
-    date: "Hôm nay",
-    day: "2026-05-24",
-    time: "14:32",
-    duration: "12 phút",
-    reason: "Chiếu bí",
-    tone: "sage",
-  },
-  {
-    id: "GD2047",
-    opponent: "CoThuSaiGon",
-    initials: "CT",
-    elo: 1450,
-    result: "loss",
-    change: -12,
-    date: "Hôm nay",
-    day: "2026-05-24",
-    time: "11:15",
-    duration: "18 phút",
-    reason: "Đầu hàng",
-    tone: "sand",
-  },
-  {
-    id: "GD2046",
-    opponent: "TieuTot",
-    initials: "TT",
-    elo: 1180,
-    result: "win",
-    change: 14,
-    date: "Hôm qua",
-    day: "2026-05-23",
-    time: "20:46",
-    duration: "9 phút",
-    reason: "Hết thời gian",
-    tone: "blue",
-  },
-  {
-    id: "GD2045",
-    opponent: "BachMa",
-    initials: "BM",
-    elo: 1380,
-    result: "draw",
-    change: 2,
-    date: "Hôm qua",
-    day: "2026-05-23",
-    time: "19:20",
-    duration: "24 phút",
-    reason: "Đồng ý hòa",
-    tone: "rose",
-  },
-  {
-    id: "GD2044",
-    opponent: "LamSon",
-    initials: "LS",
-    elo: 1375,
-    result: "win",
-    change: 18,
-    date: "22/05/2026",
-    day: "2026-05-22",
-    time: "16:08",
-    duration: "15 phút",
-    reason: "Đối thủ đầu hàng",
-    tone: "sage",
-  },
-  {
-    id: "GD2043",
-    opponent: "ThienMa",
-    initials: "TM",
-    elo: 1490,
-    result: "loss",
-    change: -10,
-    date: "18/05/2026",
-    day: "2026-05-18",
-    time: "21:32",
-    duration: "16 phút",
-    reason: "Chiếu bí",
-    tone: "sand",
-  },
-  {
-    id: "GD2042",
-    opponent: "TinhTam",
-    initials: "TT",
-    elo: 1260,
-    result: "win",
-    change: 15,
-    date: "12/05/2026",
-    day: "2026-05-12",
-    time: "10:05",
-    duration: "11 phút",
-    reason: "Hết nước đi",
-    tone: "blue",
-  },
-]
+export function opponentNameForUser(match: GameRecord, userId: number): string {
+  if (match.red_user_id === userId) return match.black_player;
+  if (match.black_user_id === userId) return match.red_player;
+  return `${match.red_player} — ${match.black_player}`;
+}
 
-export const resultLabels = { win: "Thắng", draw: "Hòa", loss: "Thua" }
-
-export function getDemoRankings(elo: number) {
-  return rankings.map((player) => player.username === "MinhAnh" && Number.isFinite(elo)
-    ? { ...player, elo: Math.max(0, Math.floor(elo)) }
-    : player).sort((a, b) => b.elo - a.elo)
+export function eloChangeForUser(match: GameRecord, userId: number): number {
+  if (match.red_user_id === userId) return match.red_elo_change;
+  if (match.black_user_id === userId) return match.black_elo_change;
+  return 0;
 }
 
 export type Piece = {
-  id: string
-  side: Side
-  kind: string
-  label: PieceType
-  x: number
-  y: number
-}
+  id: string;
+  side: Side;
+  kind: string;
+  label: PieceType;
+  x: number;
+  y: number;
+};
+
 export type ChessMove = {
-  pieceId: string
-  fromX: number
-  fromY: number
-  toX: number
-  toY: number
-  notation: string
-  side: Side
-}
+  pieceId: string;
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  notation: string;
+  side: Side;
+};
 
 export function initialPieces(): Piece[] {
-  const back: PieceType[] = [
-    "Xe",
-    "Mã",
-    "Tượng",
-    "Sĩ",
-    "Tướng",
-    "Sĩ",
-    "Tượng",
-    "Mã",
-    "Xe",
-  ]
+  const back: PieceType[] = ["Xe", "Mã", "Tượng", "Sĩ", "Tướng", "Sĩ", "Tượng", "Mã", "Xe"];
   return (["black", "red"] as Side[]).flatMap((side) => {
-    const y = side === "red" ? 9 : 0
+    const y = side === "red" ? 9 : 0;
     const pieces: Piece[] = back.map((label, x) => ({
       id: `${side}-${x}`,
       side,
@@ -426,8 +202,8 @@ export function initialPieces(): Piece[] {
       label,
       x,
       y,
-    }))
-    ;[1, 7].forEach((x) =>
+    }));
+    [1, 7].forEach((x) =>
       pieces.push({
         id: `${side}-c${x}`,
         side,
@@ -436,8 +212,8 @@ export function initialPieces(): Piece[] {
         x,
         y: side === "red" ? 7 : 2,
       }),
-    )
-    ;[0, 2, 4, 6, 8].forEach((x) =>
+    );
+    [0, 2, 4, 6, 8].forEach((x) =>
       pieces.push({
         id: `${side}-p${x}`,
         side,
@@ -446,118 +222,88 @@ export function initialPieces(): Piece[] {
         x,
         y: side === "red" ? 6 : 3,
       }),
-    )
-    return pieces
-  })
+    );
+    return pieces;
+  });
 }
 
-export const replayMoves: ChessMove[] = [
-  {
-    pieceId: "red-c7",
-    fromX: 7,
-    fromY: 7,
-    toX: 4,
-    toY: 7,
-    notation: "P2–5",
-    side: "red",
-  },
-  {
-    pieceId: "black-7",
-    fromX: 7,
-    fromY: 0,
-    toX: 6,
-    toY: 2,
-    notation: "M8.7",
-    side: "black",
-  },
-  {
-    pieceId: "red-7",
-    fromX: 7,
-    fromY: 9,
-    toX: 6,
-    toY: 7,
-    notation: "M2.3",
-    side: "red",
-  },
-  {
-    pieceId: "black-8",
-    fromX: 8,
-    fromY: 0,
-    toX: 7,
-    toY: 0,
-    notation: "X9–8",
-    side: "black",
-  },
-  {
-    pieceId: "red-8",
-    fromX: 8,
-    fromY: 9,
-    toX: 7,
-    toY: 9,
-    notation: "X1–2",
-    side: "red",
-  },
-  {
-    pieceId: "black-p4",
-    fromX: 4,
-    fromY: 3,
-    toX: 4,
-    toY: 4,
-    notation: "T5.1",
-    side: "black",
-  },
-  {
-    pieceId: "red-p4",
-    fromX: 4,
-    fromY: 6,
-    toX: 4,
-    toY: 5,
-    notation: "T5.1",
-    side: "red",
-  },
-  {
-    pieceId: "black-c1",
-    fromX: 1,
-    fromY: 2,
-    toX: 2,
-    toY: 2,
-    notation: "P2–3",
-    side: "black",
-  },
-  {
-    pieceId: "red-1",
-    fromX: 1,
-    fromY: 9,
-    toX: 2,
-    toY: 7,
-    notation: "M8.7",
-    side: "red",
-  },
-  {
-    pieceId: "black-p2",
-    fromX: 2,
-    fromY: 3,
-    toX: 2,
-    toY: 4,
-    notation: "T3.1",
-    side: "black",
-  },
-  {
-    pieceId: "red-c1",
-    fromX: 1,
-    fromY: 7,
-    toX: 1,
-    toY: 4,
-    notation: "P8.3",
-    side: "red",
-  },
-  {
-    pieceId: "black-1",
-    fromX: 1,
-    fromY: 0,
-    toX: 2,
-    toY: 2,
-    notation: "M2.3",
-    side: "black",
-  },
-]
+export function parseReplayMoves(notation: string): ChessMove[] {
+  const pieces = initialPieces();
+  const replay: ChessMove[] = [];
+  let side: Side = "red";
+  for (const token of notation.trim().split(/\s+/).filter(Boolean)) {
+    if (/^\d+\.(?:\.\.)?$/.test(token)) continue;
+    const coordinates = token.match(/^([a-i])([0-9])-([a-i])([0-9])$/);
+    if (!coordinates) throw new Error("Biên bản nước đi không hợp lệ.");
+    const [, fromFile, fromRank, toFile, toRank] = coordinates;
+    const fromX = fromFile.charCodeAt(0) - 97;
+    const fromY = Number(fromRank);
+    const toX = toFile.charCodeAt(0) - 97;
+    const toY = Number(toRank);
+    const piece = pieces.find((candidate) => candidate.x === fromX && candidate.y === fromY);
+    if (!piece || piece.side !== side || (fromX === toX && fromY === toY)) {
+      throw new Error("Biên bản nước đi không hợp lệ.");
+    }
+    replay.push({
+      pieceId: piece.id,
+      fromX,
+      fromY,
+      toX,
+      toY,
+      notation: token,
+      side,
+    });
+    const nextPieces = pieces
+      .filter(
+        (candidate) => candidate.id === piece.id || candidate.x !== toX || candidate.y !== toY,
+      )
+      .map((candidate) =>
+        candidate.id === piece.id ? { ...candidate, x: toX, y: toY } : candidate,
+      );
+    pieces.splice(0, pieces.length, ...nextPieces);
+    side = side === "red" ? "black" : "red";
+  }
+  return replay;
+}
+
+const fenPieceTypes: Record<string, PieceType> = {
+  k: "Tướng",
+  a: "Sĩ",
+  b: "Tượng",
+  e: "Tượng",
+  n: "Mã",
+  h: "Mã",
+  r: "Xe",
+  c: "Pháo",
+  p: "Tốt",
+};
+
+export function piecesFromFen(fen: string): Piece[] {
+  const placement = fen.trim().split(/\s+/)[0];
+  const rows = placement?.split("/") || [];
+  if (rows.length !== 10) throw new Error("FEN bàn cờ cần có 10 hàng.");
+  const pieces: Piece[] = [];
+  rows.forEach((row, y) => {
+    let x = 0;
+    for (const code of row) {
+      if (/^[1-9]$/.test(code)) {
+        x += Number(code);
+        continue;
+      }
+      const label = fenPieceTypes[code.toLowerCase()];
+      if (!label || x > 8) throw new Error("FEN bàn cờ không hợp lệ.");
+      const side: Side = code === code.toUpperCase() ? "red" : "black";
+      pieces.push({
+        id: `${side}-${x}-${y}`,
+        side,
+        kind: pieceSymbol(side, label),
+        label,
+        x,
+        y,
+      });
+      x += 1;
+    }
+    if (x !== 9) throw new Error("Mỗi hàng FEN phải có đúng 9 cột.");
+  });
+  return pieces;
+}

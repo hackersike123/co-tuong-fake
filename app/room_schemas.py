@@ -1,5 +1,6 @@
 """Request and response models for public game rooms."""
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -48,12 +49,28 @@ class RoomJoinRequest(BaseModel):
     participant_token: str | None = Field(default=None, min_length=32, max_length=128)
     invite_token: str | None = Field(default=None, min_length=32, max_length=128)
     password: str | None = Field(default=None, min_length=1, max_length=128, repr=False)
+    participant_name: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @field_validator("participant_name")
+    @classmethod
+    def trim_participant_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        name = value.strip()
+        if not name:
+            raise ValueError("Participant name cannot be blank")
+        return name
 
 
 class RoomCodeJoinRequest(RoomJoinRequest):
-    """Numeric room code and optional tokens used from the public lobby."""
+    """Six-character room code; legacy numeric IDs remain accepted temporarily."""
 
-    room_code: str = Field(pattern=r"^[0-9]{1,10}$", examples=["123"])
+    room_code: str = Field(pattern=r"^(?:[A-Za-z0-9]{6}|[0-9]{1,10})$", examples=["A7K2Q9"])
+
+    @field_validator("room_code")
+    @classmethod
+    def normalize_room_code(cls, value: str) -> str:
+        return value.strip().upper()
 
 
 class RoomActionRequest(BaseModel):
@@ -80,9 +97,13 @@ class RoomSummary(BaseModel):
     id: int
     room_id: int
     room_uuid: str
+    room_code: str
     room_name: str
     name: str
     host_name: str
+    host_elo: int | None = None
+    player2_name: str | None = None
+    player2_elo: int | None = None
     visibility: Literal["public", "private"]
     is_public: bool
     has_password: bool
@@ -108,13 +129,41 @@ class RoomGameSnapshot(BaseModel):
     timer_seconds: Literal[15, 30, 60]
     status: Literal["playing", "finished"]
     result: str | None = None
+    reason: str | None = None
     winner: Literal["w", "b"] | None = None
+    round_number: int = 0
+    notation: str = ""
+    draw_offer_by: Literal["player1", "player2"] | None = None
+    rematch_requested_by: list[Literal["player1", "player2"]] = Field(
+        default_factory=list
+    )
     paused: bool = False
     disconnected_players: list[Literal["player1", "player2"]] = Field(default_factory=list)
     reconnect_deadlines_ms: dict[Literal["player1", "player2"], int] = Field(
         default_factory=dict
     )
     server_time_ms: int
+
+
+class RoomMatchHistory(BaseModel):
+    """Saved result and move notation for one completed room round."""
+
+    id: int
+    match_key: str
+    room_id: int
+    room_uuid: str
+    round_number: int
+    room_name: str
+    red_player: str
+    black_player: str
+    result: str
+    reason: str | None
+    winner: Literal["w", "b"] | None
+    notation: str
+    final_fen: str
+    finished_at: datetime
+    red_elo_change: int = 0
+    black_elo_change: int = 0
 
 
 class RoomMoveRequest(BaseModel):

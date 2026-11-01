@@ -52,6 +52,27 @@ def create_access_token(user_id: int, email: str, username: str | None) -> tuple
     return token, expires_in
 
 
+def decode_access_token(token: str) -> int:
+    """Validate an access JWT and return its subject user ID."""
+    if len(JWT_SECRET) < 32 or JWT_SECRET.startswith("replace-with-a-random-secret"):
+        raise ValueError("Authentication is not configured")
+    try:
+        claims = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+            options={"require": ["sub", "exp", "iat", "jti", "token_type"]},
+        )
+        if claims.get("token_type") != "access":
+            raise ValueError("Not an access token")
+        user_id = int(claims["sub"])
+        if user_id <= 0:
+            raise ValueError("Invalid access-token subject")
+        return user_id
+    except (jwt.PyJWTError, KeyError, TypeError, OverflowError) as exc:
+        raise ValueError("Invalid or expired access token") from exc
+
+
 def create_refresh_token() -> str:
     """Create an opaque, high-entropy browser refresh token."""
     return secrets.token_urlsafe(48)

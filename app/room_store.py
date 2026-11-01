@@ -1,27 +1,23 @@
 """Redis-backed storage and atomic lifecycle operations for public rooms."""
 
+import json
 import secrets
+import string
 import time
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
-from redis import Redis
-
-from .settings import REDIS_URL
+from .redis_connection import redis_client
 from .xiangqi import STARTING_FEN
 
 
-redis_client = Redis.from_url(
-    REDIS_URL,
-    decode_responses=True,
-    socket_connect_timeout=3,
-    socket_timeout=5,
-)
-
 PUBLIC_ROOMS_KEY = "rooms:public"
 ROOM_SEQUENCE_KEY = "rooms:sequence"
+ROOM_CODE_INDEX_PREFIX = "rooms:code:"
 RECONNECT_TIMEOUT_MS = 60_000
 ROOM_TIMER_LEASE_MS = 3_000
+ROOM_CODE_LENGTH = 6
+ROOM_CODE_ALPHABET = string.ascii_uppercase + string.digits
 
 _JOIN_ROOM_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
@@ -35,8 +31,12 @@ local status = redis.call('HGET', KEYS[1], 'status')
 if status == 'waiting' then
     local player2_token = redis.call('HGET', KEYS[1], 'player2_token')
     if not player2_token or player2_token == '' then
-        redis.call('HSET', KEYS[1], 'player2_token', ARGV[1])
-        redis.call('HSET', KEYS[1], 'player2_ready', 'false')
+        redis.call('HSET', KEYS[1],
+            'player2_token', ARGV[1],
+            'player2_ready', 'false',
+            'player2_name', ARGV[2],
+            'player2_user_id', ARGV[3],
+            'player2_elo', ARGV[4])
         redis.call('HSET', KEYS[2], ARGV[1], 'player2')
         return 'player2'
     end
@@ -47,6 +47,42 @@ end
 redis.call('HSET', KEYS[2], ARGV[1], 'spectator')
 redis.call('SADD', KEYS[3], ARGV[1])
 return 'spectator'
+"""
+
+_GET_OR_CREATE_ROOM_FIELD_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return false end
+local value = redis.call('HGET', KEYS[1], ARGV[1])
+if value and value ~= '' then return value end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+return ARGV[2]
+"""
+
+_APPEND_CHAT_MESSAGE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('RPUSH', KEYS[2], ARGV[1])
+redis.call('LTRIM', KEYS[2], -100, -1)
+return 1
+"""
+
+_GET_OR_CREATE_ROOM_CODE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local room_id = ARGV[1]
+local candidate = ARGV[2]
+local stored = redis.call('HGET', KEYS[1], 'room_code')
+if stored and stored ~= '' then
+    stored = string.upper(stored)
+    if stored ~= candidate then return 0 end
+end
+local owner = redis.call('GET', KEYS[2])
+if owner and owner ~= room_id then return -2 end
+if not owner then
+    local reserved = redis.call('SET', KEYS[2], room_id, 'NX')
+    if not reserved then return -2 end
+end
+if not stored or stored == '' then
+    redis.call('HSET', KEYS[1], 'room_code', candidate)
+end
+return 1
 """
 
 _SET_PLAYER_READY_SCRIPT = """
@@ -82,6 +118,7 @@ if redis.call('HGET', KEYS[1], 'player2_ready') ~= 'true' then
     return -5
 end
 local timer_seconds = tonumber(redis.call('HGET', KEYS[1], 'timer_seconds') or '30')
+local round_number = tonumber(redis.call('HGET', KEYS[1], 'game_round') or '0') + 1
 local redis_time = redis.call('TIME')
 local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
 redis.call('HSET', KEYS[1],
@@ -95,8 +132,15 @@ redis.call('HSET', KEYS[1],
     'red_time_ms', timer_seconds * 1000,
     'black_time_ms', timer_seconds * 1000,
     'turn_started_at_ms', now_ms,
+    'game_round', round_number,
+    'game_notation', '',
     'game_result', '',
-    'game_winner', '')
+    'game_reason', '',
+    'game_winner', '',
+    'game_draw_offer', '',
+    'player1_rematch_requested', 'false',
+    'player2_rematch_requested', 'false')
+redis.call('HDEL', KEYS[1], 'player1_reconnect_deadline_ms', 'player2_reconnect_deadline_ms')
 redis.call('ZREM', KEYS[2], ARGV[2])
 return 1
 """
@@ -116,10 +160,12 @@ if version ~= tonumber(ARGV[1])
     return -2
 end
 local clock_field = 'red_time_ms'
+local next_clock_field = 'black_time_ms'
 local next_side = 'b'
 local timeout_winner = 'b'
 if ARGV[3] == 'b' then
     clock_field = 'black_time_ms'
+    next_clock_field = 'red_time_ms'
     next_side = 'w'
     timeout_winner = 'w'
 elseif ARGV[3] ~= 'w' then
@@ -139,6 +185,7 @@ if remaining_ms <= 0 then
         clock_field, 0,
         'status', 'finished',
         'game_result', 'timeout',
+        'game_reason', 'timeout',
         'game_winner', timeout_winner,
         'game_version', next_version)
     return -3
@@ -150,10 +197,28 @@ redis.call('HSET', KEYS[1],
     'game_version', next_version,
     'side_to_move', next_side,
     'turn_started_at_ms', now_ms)
+local draw_offer_by = redis.call('HGET', KEYS[1], 'game_draw_offer') or ''
+if ARGV[6] ~= ''
+    or (draw_offer_by == 'player1' and ARGV[3] == 'b')
+    or (draw_offer_by == 'player2' and ARGV[3] == 'w') then
+    redis.call('HSET', KEYS[1], 'game_draw_offer', '')
+end
+if ARGV[6] == '' then
+    local turn_limit_ms = tonumber(redis.call('HGET', KEYS[1], 'timer_seconds') or '30') * 1000
+    redis.call('HSET', KEYS[1], next_clock_field, turn_limit_ms)
+end
+local notation = redis.call('HGET', KEYS[1], 'game_notation') or ''
+if notation == '' then
+    redis.call('HSET', KEYS[1], 'game_notation', ARGV[8])
+else
+    redis.call('HSET', KEYS[1], 'game_notation', notation .. ' ' .. ARGV[8])
+end
 if ARGV[6] ~= '' then
     redis.call('HSET', KEYS[1],
         'status', 'finished',
         'game_result', ARGV[6],
+        'game_reason', ARGV[9],
+        'game_paused', 'true',
         'game_winner', ARGV[7])
 end
 return 1
@@ -190,9 +255,114 @@ redis.call('HSET', KEYS[1],
     clock_field, 0,
     'status', 'finished',
     'game_result', 'timeout',
+    'game_reason', 'timeout',
     'game_winner', winner,
     'game_version', version + 1)
 return 1
+"""
+
+_OFFER_DRAW_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2]
+    or (ARGV[2] ~= 'player1' and ARGV[2] ~= 'player2') then
+    return -2
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'playing'
+    or redis.call('HGET', KEYS[1], 'game_paused') == 'true' then
+    return -3
+end
+local existing_offer = redis.call('HGET', KEYS[1], 'game_draw_offer') or ''
+if existing_offer == ARGV[2] then return 2 end
+if existing_offer ~= '' then return -4 end
+redis.call('HSET', KEYS[1], 'game_draw_offer', ARGV[2])
+return 1
+"""
+
+_RESPOND_DRAW_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2]
+    or (ARGV[2] ~= 'player1' and ARGV[2] ~= 'player2') then
+    return -2
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'playing' then return -3 end
+local offered_by = redis.call('HGET', KEYS[1], 'game_draw_offer') or ''
+if offered_by == '' or offered_by == ARGV[2] then return -4 end
+if ARGV[3] == 'true' then
+    local version = tonumber(redis.call('HGET', KEYS[1], 'game_version') or '0')
+    redis.call('HSET', KEYS[1],
+        'status', 'finished',
+        'game_result', 'agreement',
+        'game_reason', 'draw_agreement',
+        'game_winner', '',
+        'game_draw_offer', '',
+        'game_paused', 'true',
+        'game_version', version + 1)
+    return 2
+end
+redis.call('HSET', KEYS[1], 'game_draw_offer', '')
+return 1
+"""
+
+_RESIGN_GAME_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2]
+    or (ARGV[2] ~= 'player1' and ARGV[2] ~= 'player2') then
+    return -2
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'playing' then return -3 end
+local winner = 'b'
+if ARGV[2] == 'player2' then winner = 'w' end
+local version = tonumber(redis.call('HGET', KEYS[1], 'game_version') or '0')
+redis.call('HSET', KEYS[1],
+    'status', 'finished',
+    'game_result', 'resignation',
+    'game_reason', 'resignation',
+    'game_winner', winner,
+    'game_draw_offer', '',
+    'game_paused', 'true',
+    'game_version', version + 1)
+return 1
+"""
+
+_REQUEST_REMATCH_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2]
+    or (ARGV[2] ~= 'player1' and ARGV[2] ~= 'player2') then
+    return -2
+end
+if redis.call('HGET', KEYS[1], 'status') ~= 'finished' then return -3 end
+local request_field = ARGV[2] .. '_rematch_requested'
+redis.call('HSET', KEYS[1], request_field, 'true')
+if redis.call('HGET', KEYS[1], 'player1_rematch_requested') ~= 'true'
+    or redis.call('HGET', KEYS[1], 'player2_rematch_requested') ~= 'true' then
+    return 1
+end
+local redis_time = redis.call('TIME')
+local now_seconds = tonumber(redis_time[1]) + tonumber(redis_time[2]) / 1000000
+redis.call('HSET', KEYS[1],
+    'status', 'waiting',
+    'player2_ready', 'false',
+    'game_fen', '',
+    'game_version', 0,
+    'side_to_move', 'w',
+    'red_time_ms', 0,
+    'black_time_ms', 0,
+    'game_paused', 'false',
+    'game_result', '',
+    'game_reason', '',
+    'game_winner', '',
+    'game_notation', '',
+    'game_draw_offer', '',
+    'player1_connected', 'true',
+    'player2_connected', 'true',
+    'player1_rematch_requested', 'false',
+    'player2_rematch_requested', 'false')
+redis.call('HDEL', KEYS[1], 'turn_started_at_ms',
+    'player1_reconnect_deadline_ms', 'player2_reconnect_deadline_ms')
+if redis.call('HGET', KEYS[1], 'is_public') == 'true' then
+    redis.call('ZADD', KEYS[3], now_seconds, ARGV[3])
+end
+return 2
 """
 
 _LEAVE_ROOM_SCRIPT = """
@@ -209,20 +379,29 @@ if role == 'player1' and status == 'playing' then
     redis.call('HSET', KEYS[1],
         'status', 'finished',
         'game_result', 'forfeit',
+        'game_reason', 'player_left',
         'game_winner', 'b',
         'game_paused', 'true',
         'game_version', version + 1)
     return 4
 end
 if role == 'player1' then
-    redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+    local room_code = redis.call('HGET', KEYS[1], 'room_code')
+    if room_code and room_code ~= '' then
+        redis.call('DEL', ARGV[3] .. string.upper(room_code))
+    end
+    redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[5])
     redis.call('ZREM', KEYS[4], ARGV[2])
     return 2
 end
 if role == 'player2' and status == 'waiting' then
-    redis.call('HSET', KEYS[1], 'player2_token', '')
-    redis.call('HSET', KEYS[1], 'player2_ready', 'false')
-    redis.call('HSET', KEYS[1], 'player2_connected', 'false')
+    redis.call('HSET', KEYS[1],
+        'player2_token', '',
+        'player2_ready', 'false',
+        'player2_connected', 'false',
+        'player2_name', '',
+        'player2_user_id', '',
+        'player2_elo', '')
     redis.call('HDEL', KEYS[2], ARGV[1])
     return 1
 end
@@ -232,6 +411,7 @@ if role == 'player2' and status == 'playing' then
     redis.call('HSET', KEYS[1],
         'status', 'finished',
         'game_result', 'forfeit',
+        'game_reason', 'player_left',
         'game_winner', 'w',
         'game_paused', 'true',
         'game_version', version + 1,
@@ -260,17 +440,30 @@ if not role then
 end
 local status = redis.call('HGET', KEYS[1], 'status')
 if role == 'player1' and status == 'waiting' then
-    redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+    local room_code = redis.call('HGET', KEYS[1], 'room_code')
+    if room_code and room_code ~= '' then
+        redis.call('DEL', ARGV[4] .. string.upper(room_code))
+    end
+    redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[5])
     redis.call('ZREM', KEYS[4], ARGV[2])
     return {2, role, 0, 0}
 end
 if role == 'player1' and status == 'finished' then
-    redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+    local room_code = redis.call('HGET', KEYS[1], 'room_code')
+    if room_code and room_code ~= '' then
+        redis.call('DEL', ARGV[4] .. string.upper(room_code))
+    end
+    redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[5])
     redis.call('ZREM', KEYS[4], ARGV[2])
     return {2, role, 0, 0}
 end
 if role == 'player2' and status == 'waiting' then
-    redis.call('HSET', KEYS[1], 'player2_token', '', 'player2_connected', 'false')
+    redis.call('HSET', KEYS[1],
+        'player2_token', '',
+        'player2_connected', 'false',
+        'player2_name', '',
+        'player2_user_id', '',
+        'player2_elo', '')
     redis.call('HSET', KEYS[1], 'player2_ready', 'false')
     redis.call('HDEL', KEYS[2], ARGV[1])
     return {1, role, 0, 0}
@@ -314,6 +507,7 @@ if role == 'player1' or role == 'player2' then
             redis.call('HSET', KEYS[1],
                 'status', 'finished',
                 'game_result', 'timeout',
+                'game_reason', 'timeout',
                 'game_winner', timeout_winner,
                 'game_paused', 'true',
                 'game_version', version + 1)
@@ -363,6 +557,7 @@ if status == 'playing' and redis.call('HGET', KEYS[1], connected_field) == 'fals
         redis.call('HSET', KEYS[1],
             'status', 'finished',
             'game_result', 'forfeit',
+            'game_reason', 'reconnect_timeout',
             'game_winner', winner,
             'game_paused', 'true',
             'game_version', version + 1)
@@ -406,6 +601,7 @@ local version = tonumber(redis.call('HGET', KEYS[1], 'game_version') or '0')
 redis.call('HSET', KEYS[1],
     'status', 'finished',
     'game_result', 'forfeit',
+    'game_reason', 'reconnect_timeout',
     'game_winner', winner,
     'game_paused', 'true',
     'game_version', version + 1)
@@ -415,7 +611,11 @@ return 1
 
 _DELETE_ROOM_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
-redis.call('DEL', KEYS[1], KEYS[2], KEYS[3])
+local room_code = redis.call('HGET', KEYS[1], 'room_code')
+if room_code and room_code ~= '' then
+    redis.call('DEL', ARGV[2] .. string.upper(room_code))
+end
+redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[5])
 redis.call('ZREM', KEYS[4], ARGV[1])
 return 1
 """
@@ -452,8 +652,75 @@ def _spectators_key(room_id: int) -> str:
     return f"room:{room_id}:spectators"
 
 
+def _chat_history_key(room_id: int) -> str:
+    return f"room:{room_id}:chat"
+
+
+def _room_code_key(room_code: str) -> str:
+    return f"{ROOM_CODE_INDEX_PREFIX}{room_code}"
+
+
 def _timer_lease_key(room_id: int) -> str:
     return f"{_room_key(room_id)}:timer-owner"
+
+
+def _reserve_room_code(room_id: int) -> str:
+    for _ in range(128):
+        room_code = "".join(
+            secrets.choice(ROOM_CODE_ALPHABET) for _ in range(ROOM_CODE_LENGTH)
+        )
+        if redis_client.set(_room_code_key(room_code), room_id, nx=True):
+            return room_code
+    raise RuntimeError("Could not reserve a unique room code")
+
+
+def _get_or_create_room_code(room_id: int, stored_code: str | None) -> str | None:
+    known_code = str(stored_code).upper() if stored_code else None
+    for _ in range(128):
+        room_code = known_code or "".join(
+            secrets.choice(ROOM_CODE_ALPHABET) for _ in range(ROOM_CODE_LENGTH)
+        )
+        result = cast(
+            int,
+            redis_client.eval(
+                _GET_OR_CREATE_ROOM_CODE_SCRIPT,
+                2,
+                _room_key(room_id),
+                _room_code_key(room_code),
+                str(room_id),
+                room_code,
+            ),
+        )
+        if result == 1:
+            return room_code
+        if result == -1:
+            return None
+        if result == 0:
+            stored_code = cast(str | None, redis_client.hget(_room_key(room_id), "room_code"))
+            if not stored_code:
+                return None
+            known_code = stored_code.upper()
+            continue
+        if result == -2:
+            if known_code:
+                raise RuntimeError("Room code index conflicts with an existing room")
+            continue
+        raise RuntimeError("Could not assign a unique room code")
+    raise RuntimeError("Could not assign a unique room code")
+
+
+def _get_or_create_room_field(room_id: int, field: str, candidate: str) -> str | None:
+    value = cast(
+        str | None,
+        redis_client.eval(
+            _GET_OR_CREATE_ROOM_FIELD_SCRIPT,
+            1,
+            _room_key(room_id),
+            field,
+            candidate,
+        ),
+    )
+    return str(value) if value else None
 
 
 def create_room(
@@ -464,6 +731,8 @@ def create_room(
     is_public: bool = True,
     password_hash: str | None = None,
     allow_spectators: bool = True,
+    host_user_id: int | None = None,
+    host_elo: int | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Create a waiting room and assign its creator to player slot one."""
     if timer_seconds not in {15, 30, 60}:
@@ -473,6 +742,7 @@ def create_room(
     host_token = secrets.token_urlsafe(32)
     invite_token = secrets.token_urlsafe(32)
     created_at = int(time.time())
+    room_code = _reserve_room_code(room_id)
 
     pipeline = redis_client.pipeline(transaction=True)
     pipeline.hset(
@@ -480,9 +750,12 @@ def create_room(
         mapping={
             "id": room_id,
             "room_uuid": room_uuid,
+            "room_code": room_code,
             "name": name,
             "room_name": name,
             "host_name": host_name,
+            "host_user_id": host_user_id or "",
+            "host_elo": host_elo if host_user_id is not None and host_elo is not None else "",
             "timer_seconds": timer_seconds,
             "time_per_move": timer_seconds,
             "visibility": "public" if is_public else "private",
@@ -494,6 +767,9 @@ def create_room(
             "host_token": host_token,
             "invite_token": invite_token,
             "player2_token": "",
+            "player2_name": "",
+            "player2_user_id": "",
+            "player2_elo": "",
             "player2_connected": "true",
             "created_at": created_at,
         },
@@ -501,7 +777,11 @@ def create_room(
     pipeline.hset(_participants_key(room_id), host_token, "player1")
     if is_public:
         pipeline.zadd(PUBLIC_ROOMS_KEY, {str(room_id): created_at})
-    pipeline.execute()
+    try:
+        pipeline.execute()
+    except Exception:
+        redis_client.delete(_room_code_key(room_code))
+        raise
 
     room = get_room(room_id)
     if room is None:
@@ -511,20 +791,11 @@ def create_room(
 
 def get_or_create_invite_token(room_id: int) -> str | None:
     """Return the room's share token, adding one for rooms created by older code."""
-    room_key = _room_key(room_id)
-    if not redis_client.exists(room_key):
-        return None
-
-    invite_token = redis_client.hget(room_key, "invite_token")
-    if invite_token:
-        return str(invite_token)
-
-    candidate = secrets.token_urlsafe(32)
-    if redis_client.hsetnx(room_key, "invite_token", candidate):
-        return candidate
-
-    invite_token = redis_client.hget(room_key, "invite_token")
-    return str(invite_token) if invite_token else None
+    return _get_or_create_room_field(
+        room_id,
+        "invite_token",
+        secrets.token_urlsafe(32),
+    )
 
 
 def is_valid_invite_token(room_id: int, invite_token: str) -> bool:
@@ -544,9 +815,12 @@ def get_room(room_id: int) -> dict[str, Any] | None:
 
     room_uuid = values.get("room_uuid")
     if not room_uuid:
-        candidate = uuid4().hex
-        redis_client.hsetnx(_room_key(room_id), "room_uuid", candidate)
-        room_uuid = redis_client.hget(_room_key(room_id), "room_uuid") or candidate
+        room_uuid = _get_or_create_room_field(room_id, "room_uuid", uuid4().hex)
+        if room_uuid is None:
+            return None
+    room_code = _get_or_create_room_code(room_id, values.get("room_code"))
+    if room_code is None:
+        return None
     stored_is_public = values.get("is_public")
     is_public = (
         stored_is_public != "false"
@@ -559,9 +833,13 @@ def get_room(room_id: int) -> dict[str, Any] | None:
         "id": int(values["id"]),
         "room_id": int(values["id"]),
         "room_uuid": str(room_uuid),
+        "room_code": room_code,
         "room_name": values.get("room_name", values["name"]),
         "name": values["name"],
         "host_name": values.get("host_name", "Khách"),
+        "host_elo": int(values["host_elo"]) if values.get("host_elo") else None,
+        "player2_name": values.get("player2_name") or None,
+        "player2_elo": int(values["player2_elo"]) if values.get("player2_elo") else None,
         "timer_seconds": timer_seconds,
         "time_per_move": timer_seconds,
         "visibility": "public" if is_public else "private",
@@ -574,6 +852,27 @@ def get_room(room_id: int) -> dict[str, Any] | None:
         "spectator_count": int(redis_client.scard(_spectators_key(room_id))),
         "created_at": int(values["created_at"]),
     }
+
+
+def get_room_id_by_code(room_code: str) -> int | None:
+    """Resolve a six-character code, with numeric room IDs kept as a legacy fallback."""
+    normalized = room_code.strip().upper()
+    if not normalized:
+        return None
+
+    indexed_room_id = redis_client.get(_room_code_key(normalized))
+    if indexed_room_id is not None:
+        resolved_room_id = int(indexed_room_id)
+        stored_code = redis_client.hget(_room_key(resolved_room_id), "room_code")
+        if stored_code and str(stored_code).upper() == normalized:
+            return resolved_room_id
+        redis_client.delete(_room_code_key(normalized))
+
+    if normalized.isdigit() and len(normalized) <= 10:
+        legacy_room_id = int(normalized)
+        if redis_client.exists(_room_key(legacy_room_id)):
+            return legacy_room_id
+    return None
 
 
 def get_room_password_hash(room_id: int) -> str | None:
@@ -596,8 +895,43 @@ def list_public_rooms(limit: int = 100) -> list[dict[str, Any]]:
     return rooms
 
 
-def join_room(room_id: int, participant_token: str) -> str | None:
+def append_chat_message(room_id: int, message: dict[str, Any]) -> bool:
+    """Persist a room chat event while bounding storage to the latest 100 messages."""
+    result = redis_client.eval(
+        _APPEND_CHAT_MESSAGE_SCRIPT,
+        2,
+        _room_key(room_id),
+        _chat_history_key(room_id),
+        json.dumps(message, ensure_ascii=False, separators=(",", ":")),
+    )
+    return bool(result)
+
+
+def get_chat_history(room_id: int) -> list[dict[str, Any]]:
+    """Return the retained chat messages in chronological order."""
+    history: list[dict[str, Any]] = []
+    for raw_message in redis_client.lrange(_chat_history_key(room_id), 0, -1):
+        try:
+            message = json.loads(raw_message)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(message, dict):
+            history.append(message)
+    return history
+
+
+def join_room(
+    room_id: int,
+    participant_token: str,
+    *,
+    participant_name: str | None = None,
+    user_id: int | None = None,
+    elo: int | None = None,
+) -> str | None:
     """Atomically assign player two or a spectator role to a joining token."""
+    normalized_name = (participant_name or "Kỳ hữu").strip() or "Kỳ hữu"
+    user_id_value = str(user_id) if user_id is not None else ""
+    elo_value = str(elo) if user_id is not None and elo is not None else ""
     result = redis_client.eval(
         _JOIN_ROOM_SCRIPT,
         3,
@@ -605,12 +939,33 @@ def join_room(room_id: int, participant_token: str) -> str | None:
         _participants_key(room_id),
         _spectators_key(room_id),
         participant_token,
+        normalized_name,
+        user_id_value,
+        elo_value,
     )
     if result == -1:
         return None
     if result == -2:
         return "spectators_disabled"
     return str(result)
+
+
+def get_room_identity(room_id: int) -> dict[str, int | str | None] | None:
+    """Return real player names and account IDs for private match persistence."""
+    values = redis_client.hgetall(_room_key(room_id))
+    if not values:
+        return None
+
+    def optional_int(key: str) -> int | None:
+        value = values.get(key)
+        return int(value) if value else None
+
+    return {
+        "red_player": values.get("host_name", "Kỳ hữu"),
+        "black_player": values.get("player2_name") or "Kỳ hữu",
+        "red_user_id": optional_int("host_user_id"),
+        "black_user_id": optional_int("player2_user_id"),
+    }
 
 
 def set_player_ready(room_id: int, participant_token: str, ready: bool = True) -> int:
@@ -635,6 +990,15 @@ def get_participant_role(room_id: int, participant_token: str) -> str | None:
     """Return the role bound to a room access token."""
     role = redis_client.hget(_participants_key(room_id), participant_token)
     return str(role) if role else None
+
+
+def get_room_participant_roles(room_id: int) -> dict[str, str]:
+    """Return active participant roles for secure history persistence.
+
+    Callers must hash participant tokens before storing them outside Redis.
+    """
+    participants = redis_client.hgetall(_participants_key(room_id))
+    return {str(token): str(role) for token, role in participants.items()}
 
 
 def start_room(room_id: int, host_token: str) -> int:
@@ -684,7 +1048,16 @@ def get_game_snapshot(room_id: int) -> dict[str, Any] | None:
         "timer_seconds": int(values.get("timer_seconds", 30)),
         "status": values.get("status", "playing"),
         "result": values.get("game_result") or None,
+        "reason": values.get("game_reason") or None,
         "winner": values.get("game_winner") or None,
+        "round_number": int(values.get("game_round", 0)),
+        "notation": values.get("game_notation", ""),
+        "draw_offer_by": values.get("game_draw_offer") or None,
+        "rematch_requested_by": [
+            role
+            for role in ("player1", "player2")
+            if values.get(f"{role}_rematch_requested") == "true"
+        ],
         "paused": paused,
         "disconnected_players": [
             role
@@ -709,6 +1082,8 @@ def apply_game_move(
     next_fen: str,
     result: str | None = None,
     winner: str | None = None,
+    notation: str = "",
+    reason: str | None = None,
 ) -> int:
     """Atomically apply a validated move and charge its mover's clock.
 
@@ -729,6 +1104,72 @@ def apply_game_move(
             next_fen,
             result or "",
             winner or "",
+            notation,
+            reason or "",
+        )
+    )
+
+
+def offer_draw(room_id: int, participant_token: str, role: str) -> int:
+    """Offer an agreed draw; only the other player can accept or decline it."""
+    return int(
+        redis_client.eval(
+            _OFFER_DRAW_SCRIPT,
+            2,
+            _room_key(room_id),
+            _participants_key(room_id),
+            participant_token,
+            role,
+        )
+    )
+
+
+def respond_to_draw(
+    room_id: int,
+    participant_token: str,
+    role: str,
+    accept: bool,
+) -> int:
+    """Accept or decline the pending draw offer from the opposing player."""
+    return int(
+        redis_client.eval(
+            _RESPOND_DRAW_SCRIPT,
+            2,
+            _room_key(room_id),
+            _participants_key(room_id),
+            participant_token,
+            role,
+            "true" if accept else "false",
+        )
+    )
+
+
+def resign_game(room_id: int, participant_token: str, role: str) -> int:
+    """Finish a playing game atomically with the other player as the winner."""
+    return int(
+        redis_client.eval(
+            _RESIGN_GAME_SCRIPT,
+            2,
+            _room_key(room_id),
+            _participants_key(room_id),
+            participant_token,
+            role,
+        )
+    )
+
+
+def request_rematch(room_id: int, participant_token: str, role: str) -> int:
+    """Start a new waiting round only after both players request a rematch."""
+    return int(
+        redis_client.eval(
+            _REQUEST_REMATCH_SCRIPT,
+            3,
+            _room_key(room_id),
+            _participants_key(room_id),
+            PUBLIC_ROOMS_KEY,
+            participant_token,
+            role,
+            room_id,
         )
     )
 
@@ -755,13 +1196,15 @@ def leave_room(room_id: int, participant_token: str) -> int:
     return int(
         redis_client.eval(
             _LEAVE_ROOM_SCRIPT,
-            4,
+            5,
             _room_key(room_id),
             _participants_key(room_id),
             _spectators_key(room_id),
             PUBLIC_ROOMS_KEY,
+            _chat_history_key(room_id),
             participant_token,
             room_id,
+            ROOM_CODE_INDEX_PREFIX,
         )
     )
 
@@ -770,14 +1213,16 @@ def mark_player_disconnected(room_id: int, participant_token: str) -> dict[str, 
     """Mark a socket drop and start a Redis-timed 60-second reconnect window."""
     result = redis_client.eval(
         _MARK_PLAYER_DISCONNECTED_SCRIPT,
-        4,
+        5,
         _room_key(room_id),
         _participants_key(room_id),
         _spectators_key(room_id),
         PUBLIC_ROOMS_KEY,
+        _chat_history_key(room_id),
         participant_token,
         room_id,
         RECONNECT_TIMEOUT_MS,
+        ROOM_CODE_INDEX_PREFIX,
     )
     code, role, deadline_ms, now_ms = result
     return {
@@ -834,12 +1279,14 @@ def delete_room(room_id: int) -> bool:
     return bool(
         redis_client.eval(
             _DELETE_ROOM_SCRIPT,
-            4,
+            5,
             _room_key(room_id),
             _participants_key(room_id),
             _spectators_key(room_id),
             PUBLIC_ROOMS_KEY,
+            _chat_history_key(room_id),
             room_id,
+            ROOM_CODE_INDEX_PREFIX,
         )
     )
 

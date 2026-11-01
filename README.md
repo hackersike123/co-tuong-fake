@@ -1,9 +1,37 @@
 # Kỳ Tiên Hội — Frontend và Backend
 
-Repository này gồm giao diện React/Vite trong `src/` và API FastAPI trong `app/`.
-Frontend hiện vẫn là prototype: các luồng đăng nhập, phòng, chat, ghép trận và
-nước đi được mô phỏng trong trình duyệt. Chạy backend không tự động kết nối UI;
-`src/config/connection.ts` giữ kết nối ở chế độ demo.
+Repository này gồm giao diện React/Vite trong `src/` và backend FastAPI trong
+`app/`. Frontend gửi lệnh tài khoản, phòng và PvE qua raw WebSocket; lobby và
+ván PvP nhận snapshot, nước đi và timer qua các WebSocket chuyên biệt. Các HTTP
+route hiện có vẫn được giữ để tương thích với client cũ. `/api/health` và trang
+OpenAPI tiếp tục dùng HTTP.
+
+## WebSocket client protocol
+
+Frontend API and WebSocket URLs are same-origin by default. Host-run Vite proxies
+`/api/*` to FastAPI using `VITE_API_PROXY_TARGET`; Docker Nginx routes the same
+paths to the backend container. Set `VITE_API_BASE_URL` only for an intentionally
+separate API origin.
+
+```json
+{
+  "id": "request-1",
+  "event": "room.create",
+  "data": { "room_name": "Bàn cờ", "host_name": "Kỳ hữu" }
+}
+```
+
+Server trả về cùng `id`, `event` kết thúc bằng `.result`, `ok` và `data` hoặc
+`error`. Lobby dùng `/api/v1/rooms/ws`; trận PvP dùng
+`/api/v1/rooms/{room_id}/ws?participant_token=...`. Nước đi PvP và đồng hồ được
+xác thực/phát từ backend. PvE dùng `pve.start`, `pve.player_move` và
+`pve.ai_move` trên RPC WebSocket; backend kiểm tra luật trước khi áp dụng nước
+đi.
+
+GitHub Actions tự chạy toàn bộ Python tests, compile backend, TypeScript
+typecheck và Vite production build cho pull request vào `main` hoặc `developer`.
+Để chặn merge khi test lỗi, bật branch protection cho `main` và đặt hai check
+`Backend tests` và `Frontend build and typecheck` làm required status checks.
 
 ## Chạy frontend trên Windows
 
@@ -36,54 +64,276 @@ pnpm format
 `pnpm preview` chạy bản build; dừng máy chủ dev trước nếu cùng dùng cổng 8443.
 Các màn hình và luồng bấm thử được mô tả trong [PROTOTYPE.md](./PROTOTYPE.md).
 
+## Cấu hình file `.env`
+
+`.env.example` là **mẫu hướng dẫn**, không phải bộ thông tin xác thực dùng được ngay.
+Nó chứa giá trị giữ chỗ cho các bí mật và để trống SMTP; hãy thay các giá trị cần thiết
+trong `.env` ở thư mục gốc. `.env` đã được Git bỏ qua. Nếu file `.env` của bạn đã
+có cấu hình, **không chép đè**; so sánh với mẫu rồi chỉ bổ sung các biến còn thiếu.
+Chỉ tạo mới bằng `Copy-Item .env.example .env` khi chưa có `.env`. Bản hướng dẫn
+tiếng Anh nằm ở [ENV_CONFIG.en.md](./ENV_CONFIG.en.md); mẫu `.env` tiếng Anh là
+[.env.example.en](./.env.example.en).
+
+### 1. Tạo ba giá trị bí mật riêng biệt
+
+Chạy lệnh này ba lần, giữ từng kết quả trong máy và điền lần lượt vào
+`POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `JWT_SECRET`:
+
+```powershell
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Mỗi kết quả là 64 ký tự hex (32 byte ngẫu nhiên). Không dùng lại cùng một giá
+trị, không dùng `REPLACE_WITH_...`, không gửi các giá trị này trong chat và không
+commit file `.env`. Có thể dùng `openssl rand -hex 32` thay thế.
+
+### 2. Ý nghĩa các nhóm biến
+
+| Biến | Cách điền |
+|---|---|
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Compose dùng để tạo PostgreSQL nội bộ. Đổi mật khẩu trước khi chạy; không mở cổng DB ra Internet. |
+| `REDIS_PASSWORD`, `REDIS_PORT` | Redis trong Compose yêu cầu mật khẩu. `REDIS_PORT` chỉ bind vào `127.0.0.1` để host dev kết nối. |
+| `JWT_SECRET` | Bí mật ký access token, tối thiểu 32 ký tự; dùng giá trị ngẫu nhiên riêng. |
+| `APP_ENV` | `local` cho máy dev, `staging` cho kiểm thử HTTPS, `production` cho triển khai thật. `staging`/`production` không phục vụ trang test `/dev/rooms`. |
+| `DATABASE_URL`, `REDIS_URL` | Dành cho backend chạy trực tiếp trên host. Compose tự ghi đè bằng địa chỉ PostgreSQL/Redis nội bộ của stack. |
+| `AUTH_COOKIE_SECURE` | `false` khi chạy HTTP local; bắt buộc `true` khi chạy HTTPS/ngrok. |
+| `PUBLIC_APP_URL` | Origin chuẩn dùng trong link email/lời mời, ví dụ `http://localhost:8002`; không thêm path. |
+| `CORS_ALLOWED_ORIGINS` | Danh sách origin (nguồn truy cập) cách nhau bằng dấu phẩy, ví dụ `http://localhost:8002,http://localhost:8443`. Phải khớp giao thức, tên máy và port trong trình duyệt; không dùng `*`, đường dẫn hay query. Allowlist này cũng được kiểm tra cho WebSocket. |
+| `VITE_API_BASE_URL` | Để trống cho same-origin: Vite/Nginx proxy `/api` và WebSocket. Chỉ điền khi API thực sự nằm ở origin khác; phải build lại frontend sau khi đổi. |
+| `VITE_API_PROXY_TARGET` | Backend đích khi chạy Vite trên host, mặc định `http://127.0.0.1:8000`. |
+| `BACKEND_BIND_ADDRESS`, `BACKEND_PORT`, `NGINX_BIND_ADDRESS`, `NGINX_HTTP_PORT` | Local nên bind `127.0.0.1`; mặc định API `8000`, giao diện Nginx `8002`. Không bind backend/database/cache trực tiếp ra Internet. |
+| `SMTP_*` | Cần cho đăng ký/xác minh email, khôi phục mật khẩu và thư mời. Nếu để trống, các luồng email trả lỗi cấu hình dịch vụ. |
+| `RTC_STUN_URLS`, `RTC_TURN_*` | Cấu hình WebRTC cho gọi thoại/video. STUN mặc định có sẵn; một số mạng cần TURN để kết nối được. |
+
+### 3. Cấu hình SMTP
+
+Với Gmail, bật xác minh hai bước rồi tạo **App Password**; không dùng mật khẩu
+đăng nhập Gmail. Điền các biến tương ứng trong `.env`:
+
+```text
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your-address@gmail.com
+SMTP_PASSWORD=your-google-app-password
+SMTP_FROM_EMAIL=your-address@gmail.com
+SMTP_FROM_NAME=Kỳ Tiên Hội
+SMTP_USE_SSL=false
+SMTP_STARTTLS=true
+```
+
+Dùng `SMTP_USERNAME` là địa chỉ đăng nhập đầy đủ; `SMTP_FROM_EMAIL` phải là địa
+chỉ đó hoặc alias gửi thư đã được nhà cung cấp cấp quyền. Với SMTP SSL ngầm định
+(thường port `465`), đặt `SMTP_USE_SSL=true` và `SMTP_STARTTLS=false`; không bật cả hai.
+Không gửi mật khẩu SMTP hoặc mã OTP qua trò chuyện. Sau khi đổi SMTP, khởi động lại backend.
+
+Gọi thoại/video dùng WebRTC và chỉ xin quyền micro/camera sau khi người chơi bấm gọi;
+trình duyệt cần HTTPS (hoặc localhost). STUN mặc định hỗ trợ nhiều mạng, nhưng một số
+NAT/firewall cần TURN. Điền `RTC_TURN_URLS`, `RTC_TURN_USERNAME` và
+`RTC_TURN_CREDENTIAL` từ nhà cung cấp TURN; thông tin này chỉ được gửi trong snapshot
+WebSocket của người chơi có token phòng, không gửi cho khán giả.
+
+### 4. Backend chạy trên máy phát triển và Docker Compose
+
+- Backend chạy trực tiếp trên Windows dùng `DATABASE_URL` (mặc định SQLite) và
+  `REDIS_URL`. Nếu dùng Redis trong Compose, URL host cần chứa mật khẩu Redis.
+- Toàn bộ stack Docker Compose dùng PostgreSQL và Redis riêng trong Docker network;
+  nó lấy `SMTP_*`, JWT và các cài đặt khác từ file môi trường nhưng **ghi đè**
+  `DATABASE_URL`/`REDIS_URL` bên trong backend container.
+- Nếu `.env` thiếu một trong ba bí mật Compose, đặt `POSTGRES_PASSWORD`,
+  `REDIS_PASSWORD` và `JWT_SECRET` riêng trong `.env.compose.local` (đã bị Git ignore).
+  Nếu `.env` đã có đủ, không cần tạo hoặc nạp overlay. Không truyền một `--env-file`
+  không tồn tại vì Compose sẽ dừng với lỗi.
+
+  ```powershell
+  # Khi secrets đã có trong .env:
+  docker compose --env-file .env config --quiet
+  docker compose --env-file .env up -d --build
+  docker compose --env-file .env ps
+
+  # Khi secrets nằm trong .env.compose.local, thêm overlay sau .env:
+  docker compose --env-file .env --env-file .env.compose.local config --quiet
+  docker compose --env-file .env --env-file .env.compose.local up -d --build
+  docker compose --env-file .env --env-file .env.compose.local ps
+  ```
+
+  Giữ nguyên cùng thứ tự `--env-file` đã chọn cho `exec`, `logs` và `down`. Không dùng
+  `down -v` trừ khi chủ động xóa toàn bộ dữ liệu PostgreSQL/Redis.
+
+### 5. Ngrok hoặc HTTPS công khai
+
+Không ghi URL ngrok tạm vào `.env.example`. Dùng file overlay ignored riêng; đặt
+`APP_ENV=staging`, `AUTH_COOKIE_SECURE=true`, bind Nginx/backend vào `127.0.0.1`,
+và điền origin HTTPS chính xác vào cả `PUBLIC_APP_URL` lẫn
+`CORS_ALLOWED_ORIGINS`. Chỉ tunnel Nginx, ví dụ `ngrok http 127.0.0.1:8002`;
+không tunnel PostgreSQL, Redis hoặc port backend. Với production, dùng
+`.env.production.example`, domain/DNS do bạn quản lý, SMTP thật và quy trình ACME
+bên dưới.
+
 ## Chạy Backend trên Windows
 
-FastAPI backend dùng SQLite mặc định. Redis cần cho luồng phòng/WebSocket; SMTP
-cần nếu thử đăng ký OTP hoặc gửi email mời. Hướng dẫn API, ví dụ request và
-cách cấu hình chi tiết nằm ở các mục backend bên dưới.
+FastAPI backend dùng SQLite mặc định khi chạy trực tiếp trên host. Redis cần cho
+luồng phòng/WebSocket; SMTP chỉ cần cho các luồng email. Sau khi cấu hình `.env`
+và cài `requirements.txt`, chạy:
 
-## Backend: run locally on Windows
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
 
-1. Create the local environment file and set the required values. For example:
+Để chạy backend trực tiếp trên host, hãy khởi động Redis có password bằng đúng
+các env file đã chuẩn bị, rồi chạy runner:
 
-   ```powershell
-   Copy-Item .env.example .env
+```powershell
+docker compose --env-file .env up -d redis
+.\scripts\run-backend.ps1
+```
+
+Nếu Redis/PostgreSQL secrets chỉ có trong `.env.compose.local`, thêm
+`--env-file .env.compose.local` sau `.env`.
+
+Backend mở tại `http://127.0.0.1:8000`. Để chạy frontend hot reload đồng thời
+với backend/database/cache trong Compose, xem mục “Host-run frontend development”.
+Để chạy automated tests, cài `requirements-dev.txt` rồi chạy
+`python -m pytest -v` từ thư mục gốc.
+
+
+## Chạy backend trên Linux / WSL2
+
+Sau khi kích hoạt môi trường ảo và cài các gói trong `requirements.txt`, chạy:
+
+```bash
+bash scripts/run-backend.sh
+```
+
+Lệnh này chạy `app.main:app` mặc định trên `127.0.0.1:8000` với một worker và uvloop.
+Có thể đặt `BACKEND_BIND_ADDRESS` để thay đổi bind address khi thật sự cần.
+Script không bật autoreload.
+
+## Origin CORS và WebSocket
+
+`CORS_ALLOWED_ORIGINS` là danh sách origin chính xác, phân cách bằng dấu phẩy.
+Khi triển khai, chỉ thêm origin thực tế mà trình duyệt dùng; wildcard bị từ chối.
+Backend kiểm tra cùng allowlist này trong mỗi lần bắt tay WebSocket trước khi
+chấp nhận kết nối.
+
+## Docker Compose: toàn bộ ứng dụng
+
+Stack mặc định gồm PostgreSQL, Redis có mật khẩu, backend FastAPI và frontend React
+được build đa giai đoạn rồi phục vụ qua Nginx. PostgreSQL/Redis chỉ nằm trong mạng
+Compose; các port backend và Nginx chỉ bind vào loopback. Backend dùng Python
+3.11-slim, uvloop và tài khoản không phải root.
+
+1. Giữ nguyên `.env` hiện có; Compose đọc cấu hình SMTP và ứng dụng từ file đó.
+   Trong container, `DATABASE_URL` và `REDIS_URL` được ghi đè để dùng PostgreSQL
+   và Redis nội bộ thay vì SQLite/Redis trên host.
+2. Nếu `.env` thiếu ba bí mật Compose, thêm `POSTGRES_PASSWORD`, `REDIS_PASSWORD`
+   và `JWT_SECRET` vào `.env.compose.local`. Dùng ba giá trị ngẫu nhiên khác nhau;
+   không chép SMTP password vào overlay. Nếu secrets đã có trong `.env`, không cần overlay.
+3. Kiểm tra cấu hình rồi khởi động bằng `.env`:
+
+   ```bash
+   docker compose --env-file .env config --quiet
+   docker compose --env-file .env up -d --build
+   docker compose --env-file .env ps
    ```
 
-   Set `JWT_SECRET` to a random value of at least 32 characters. Configure SMTP
-   credentials before trying registration, password reset, or email invitations.
-2. Start Redis:
+   Nếu secrets nằm trong `.env.compose.local`, thêm
+   `--env-file .env.compose.local` ngay sau `--env-file .env` cho mọi lệnh Compose.
 
-   ```powershell
-   docker compose up -d redis
-   ```
+4. Mở <http://127.0.0.1:8002>. Kiểm tra `/healthz` của Nginx và `/api/health`
+   của PostgreSQL, Redis và cầu nối WebSocket. Xem log bằng
+   `docker compose --env-file .env logs -f backend nginx`.
+5. Dừng bằng `docker compose --env-file .env down`;
+   volume dữ liệu được giữ lại. Chỉ dùng `down -v` khi chủ động xóa toàn bộ dữ liệu.
 
-3. Run the backend in a terminal:
+Khi dùng tunnel HTTPS, giữ Nginx/backend bind vào loopback, đặt
+`AUTH_COOKIE_SECURE=true`, và thêm origin HTTPS chính xác vào
+`CORS_ALLOWED_ORIGINS` cùng `PUBLIC_APP_URL` trong overlay bị Git bỏ qua. Không
+đưa port PostgreSQL hoặc Redis ra Internet.
 
-   ```powershell
-   py -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install -r requirements.txt
-   uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-   ```
+Dùng `.env.staging.example` để chuẩn bị môi trường staging riêng. Triển khai TLS
+trực tiếp cần `.env.production.example`, domain/DNS do bạn quản lý, SMTP thật và
+quy trình ACME bên dưới. Chưa có domain/chứng chỉ trong checkout này nên chưa
+khẳng định việc cấp mới hoặc gia hạn TLS đã được kiểm thử.
 
-To run the automated backend tests, install `requirements-dev.txt` and run
-`pytest` from the repository root.
+## Phát triển frontend trên máy, backend chạy trong Docker
 
-The API uses SQLite by default and creates `co_tuong.db` when it starts. Open
-<http://127.0.0.1:8000/docs> to try the endpoints.
+Để tải lại giao diện tự động khi sửa source, giữ PostgreSQL, Redis và FastAPI trong
+Compose rồi chỉ chạy Vite trên máy phát triển. Vite chuyển tiếp `/api/*` và
+WebSocket tới backend port 8000:
+
+```powershell
+docker compose --env-file .env up -d database redis backend
+pnpm dev
+```
+
+Nếu secrets nằm trong `.env.compose.local`, thêm
+`--env-file .env.compose.local` sau `.env`.
+
+Mở <http://127.0.0.1:8443>. `VITE_API_PROXY_TARGET` mặc định là
+`http://127.0.0.1:8000`. Giao diện chạy hoàn toàn trong container ở
+<http://127.0.0.1:8002>; Nginx chuyển tiếp cùng các đường dẫn tới FastAPI. Có thể
+chạy FastAPI trực tiếp trên host, nhưng cần tự cấu hình `DATABASE_URL` và
+`REDIS_URL` trong `.env`; cách đó không cần thiết khi chỉ phát triển frontend.
+
+Nginx dùng HTTP/1.1 Upgrade và timeout proxy 300 giây cho WebSocket. Uvicorn gửi
+ping giao thức mỗi 20 giây; trình duyệt tự phản hồi. Endpoint phòng vẫn giữ các
+thông điệp JSON `ping`/`pong`.
+
+Bản frontend Docker mặc định dùng API/WebSocket cùng origin. Nginx phục vụ SPA và
+chuyển tiếp `/api/*` tới FastAPI; không cần thư mục `dist/` trên host. Khi triển
+khai HTTPS, đặt origin thật vào `PUBLIC_APP_URL` và `CORS_ALLOWED_ORIGINS`.
+
+## Thiết lập Nginx HTTPS/WSS (khi đã có domain)
+
+Cấu hình triển khai chính thức nằm trong `compose.acme.yaml`,
+`compose.production.yaml`, `compose.certbot.yaml` và
+`nginx/production-https.conf.template.example`. Các override cần Compose v2.24.4
+trở lên. Đặt dữ liệu Let's Encrypt và ACME webroot bên ngoài repository; `.gitignore`
+cũng bỏ qua các thư mục `letsencrypt/` và `certbot/` thường dùng. Trong file
+`.env` bị Git bỏ qua, cấu hình `NGINX_SERVER_NAME`, `NGINX_BACKEND_UPSTREAM`,
+`CERTBOT_EMAIL`, `LETSENCRYPT_DIR` và `CERTBOT_WEBROOT_DIR` bằng domain bạn sở hữu
+và địa chỉ backend thực tế. Trỏ DNS về máy chủ và mở cổng TCP 80/443 trước khi
+xin chứng chỉ.
+
+Khởi động máy chủ HTTP tạm để xác thực HTTP-01, xin chứng chỉ, sau đó chuyển sang
+cấu hình HTTPS/WSS:
+
+```bash
+compose_env=(--env-file .env)
+# If Docker secrets are stored in .env.compose.local, uncomment the next line.
+# compose_env+=(--env-file .env.compose.local)
+docker compose "${compose_env[@]}" -f compose.yaml -f compose.acme.yaml up -d nginx
+docker compose "${compose_env[@]}" -f compose.yaml -f compose.acme.yaml -f compose.certbot.yaml \
+  --profile certbot run --rm --entrypoint sh certbot -c \
+  'certbot certonly --webroot -w /var/www/certbot -d "$CERTBOT_DOMAIN" --email "$CERTBOT_EMAIL" --agree-tos --no-eff-email'
+docker compose "${compose_env[@]}" -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml up -d nginx
+docker compose "${compose_env[@]}" -f compose.yaml -f compose.production.yaml -f compose.certbot.yaml exec nginx nginx -t
+```
+
+Cấu hình production chuyển hướng HTTP sang HTTPS, vẫn phục vụ đường dẫn xác thực
+ACME và cung cấp API/WebSocket qua TLS. Lên lịch chạy
+`bash scripts/renew-certbot.sh` hằng ngày bằng cron hoặc systemd timer; script gọi
+`certbot renew` rồi tải lại Nginx. Chỉ có thể xác nhận yêu cầu chứng chỉ, bắt tay
+HTTPS/WSS và quy trình gia hạn sau khi domain thật trỏ tới máy triển khai và được
+cấp chứng chỉ tin cậy.
+
+Host-run FastAPI uses SQLite by default and creates `co_tuong.db` when it starts.
+Docker Compose uses PostgreSQL and persists it in the `postgres-data` volume. Open
+<http://127.0.0.1:8000/docs> for host-run API documentation or
+<http://127.0.0.1:8002/docs> when using the Compose stack.
 
 `GET /api/health` checks the database, Redis, and the WebSocket event bridge.
 It returns HTTP 200 when all checks are healthy and HTTP 503 with per-service
 status otherwise. Application, WebSocket, and Uvicorn logs are JSON lines on
 stdout; set `LOG_LEVEL` to change the minimum log level.
 
-For production-style multi-worker runs, keep Redis available and start, for
-example, `uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4`. This
-project uses native FastAPI WebSockets, so Redis Pub/Sub relays lobby and room
-events between workers while the existing WebSocket protocol stays unchanged.
-SQLite is the local development default; production workers should use a
-shared database through `DATABASE_URL`.
+The supplied runners use one Uvicorn worker. This project uses native FastAPI
+WebSockets, so REST and WebSocket routes share the same ASGI app and port; Redis
+Pub/Sub continues to relay lobby and room events. SQLite is the local
+development default; production deployments should use a shared database
+through `DATABASE_URL`.
 
 ## Xiangqi board rules
 
@@ -245,7 +495,7 @@ Create a room with `POST /api/v1/rooms/`:
 `time_per_move` accepts 15, 30, or 60 seconds and sets each player's initial
 clock. The legacy fields `name` and `timer_seconds` are also accepted.
 The local room-creation modal and public lobby demo are available at
-`/demo/rooms` while the API server is running.
+`/dev/rooms` (available only when `APP_ENV=local`) while the API server is running.
 
 The response includes an auto-incremented numeric `room_id` (also returned as
 the legacy `id`) and a unique `room_uuid`, plus the creator's `player1` role
@@ -280,7 +530,8 @@ share or copy this URL with Web Share API / clipboard APIs. Set `PUBLIC_APP_URL`
 to a web app that handles `/room/{room_id}` and reads the `token` query value.
 
 Use `GET /api/v1/rooms/` to list only public rooms whose status is `waiting`.
-Each lobby row includes the room ID/code, name, host name, creation timestamp,
+Each lobby row includes the internal room ID and a six-character random
+alphanumeric `room_code`, name, host name, creation timestamp,
 player count, and spectator count. Join from the list or from a shared room link
 with `POST /api/v1/rooms/{room_id}/join`
 and `{}` as the body. For a direct link, send its `token` as `invite_token` in
@@ -290,8 +541,9 @@ otherwise send the room `password`. Player 2 marks ready with
 also send `{"type":"ready","ready":true}` on their room WebSocket. The Host's
 start request returns `409` until Player 2 is ready. Joining a room that has
 started is allowed only as a spectator when spectators are enabled.
-The public lobby can also join by numeric room code with
-`POST /api/v1/rooms/join` and `{"room_code":"42"}`.
+The public lobby joins with the six-character code using
+`POST /api/v1/rooms/join` and `{"room_code":"A7K2Q9"}` (case-insensitive).
+Legacy numeric IDs are still accepted temporarily for older invitations.
 Clients using the lobby WebSocket can instead send
 `{"type":"join_room","room_id":42}`. The socket responds with `room.joined`
 and the assigned role plus participant token; use that token to connect to the
@@ -306,7 +558,7 @@ The host can email an invitation with `POST /api/v1/rooms/{room_id}/invite`:
 }
 ```
 
-The API emails both the numeric room code and `join_url`; SMTP must be configured
+The API emails both the six-character room code and `join_url`; SMTP must be configured
 as described below. Only the room host can send email invitations.
 
 The host starts play with `POST /api/v1/rooms/{room_id}/start` and a body

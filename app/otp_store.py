@@ -2,20 +2,11 @@
 
 import secrets
 
-from redis import Redis
-
-from .settings import REDIS_URL
+from .redis_connection import redis_client
 
 
 OTP_TTL_SECONDS = 300
 MAX_OTP_ATTEMPTS = 5
-
-redis_client = Redis.from_url(
-    REDIS_URL,
-    decode_responses=True,
-    socket_connect_timeout=3,
-    socket_timeout=5,
-)
 
 _VERIFY_OTP_SCRIPT = """
 local code = redis.call('GET', KEYS[1])

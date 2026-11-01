@@ -3,6 +3,7 @@
 import json
 import logging
 import logging.config
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -39,6 +40,23 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+class UvicornAccessQueryFilter(logging.Filter):
+    """Remove query strings from Uvicorn access records before formatting."""
+
+    _query_string = re.compile(r'(?P<path>/[^\s?"]+)\?[^\s"]*')
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.access":
+            return True
+
+        message = record.getMessage()
+        sanitized = self._query_string.sub(r"\g<path>", message)
+        if sanitized != message:
+            record.msg = sanitized
+            record.args = ()
+        return True
+
+
 def configure_logging(level: str = "INFO") -> None:
     """Configure application and Uvicorn logs to use the JSON formatter."""
     normalized_level = level.upper()
@@ -49,6 +67,9 @@ def configure_logging(level: str = "INFO") -> None:
             "version": 1,
             "disable_existing_loggers": False,
             "formatters": {"json": {"()": JsonFormatter}},
+            "filters": {
+                "uvicorn_access_query": {"()": UvicornAccessQueryFilter},
+            },
             "handlers": {
                 "console": {
                     "class": "logging.StreamHandler",
@@ -74,6 +95,7 @@ def configure_logging(level: str = "INFO") -> None:
                 },
                 "uvicorn.access": {
                     "handlers": ["console"],
+                    "filters": ["uvicorn_access_query"],
                     "level": normalized_level,
                     "propagate": False,
                 },

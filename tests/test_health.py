@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import main, room_store
+from app.database import upgrade_sqlite_schema
 
 
 def test_health_reports_database_redis_and_websocket_status(
@@ -85,17 +86,24 @@ def test_health_http_route_reports_live_runtime_dependencies(
 
     test_engine = create_engine("sqlite:///:memory:")
     monkeypatch.setattr(main, "engine", test_engine)
-    with TestClient(main.app) as client:
-        deadline = time.monotonic() + 3
-        while main.room_hub.health_status()["status"] != "ok":
-            if time.monotonic() >= deadline:
-                raise AssertionError("WebSocket Redis Pub/Sub did not become ready")
-            time.sleep(0.01)
+    monkeypatch.setattr(
+        main,
+        "upgrade_sqlite_schema",
+        lambda: upgrade_sqlite_schema(test_engine),
+    )
+    try:
+        with TestClient(main.app) as client:
+            deadline = time.monotonic() + 3
+            while main.room_hub.health_status()["status"] != "ok":
+                if time.monotonic() >= deadline:
+                    raise AssertionError("WebSocket Redis Pub/Sub did not become ready")
+                time.sleep(0.01)
 
-        response = client.get("/api/health")
+            response = client.get("/api/health")
 
-    assert response.status_code == 200
-    assert response.json()["checks"]["database"]["status"] == "ok"
-    assert response.json()["checks"]["redis"]["status"] == "ok"
-    assert response.json()["checks"]["websocket"]["redis_pubsub"] == "ready"
-    test_engine.dispose()
+        assert response.status_code == 200
+        assert response.json()["checks"]["database"]["status"] == "ok"
+        assert response.json()["checks"]["redis"]["status"] == "ok"
+        assert response.json()["checks"]["websocket"]["redis_pubsub"] == "ready"
+    finally:
+        test_engine.dispose()

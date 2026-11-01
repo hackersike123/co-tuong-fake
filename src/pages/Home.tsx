@@ -1,4 +1,4 @@
-import { Button } from "@figma/astraui"
+import { Button } from "@figma/astraui";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -16,7 +16,7 @@ import {
   TrendingUp,
   Trophy,
   Users,
-} from "lucide-react"
+} from "lucide-react";
 import {
   ChessBoard,
   Heading,
@@ -24,26 +24,50 @@ import {
   RoomCard,
   SectionTitle,
   UserAvatar,
-} from "../components"
-import { useApp } from "../context"
-import { gameHistory, getDemoRankings, playerInitials, resultLabels } from "../data"
-import { useExperience } from "../experience/Experience"
-import { RankBadge, RankProgress } from "../rank-ui"
-import { ArenaAtmosphere } from "../experience/effects"
-import { DemoMatchmakingNotice } from "../room-demo"
+} from "../components";
+import { useApp } from "../context";
+import { intlLocale } from "../i18n-core";
+import { useLanguage } from "../i18n";
+import {
+  eloChangeForUser,
+  matchResultForUser,
+  opponentNameForUser,
+  playerInitials,
+  resultLabels,
+} from "../data";
+import { RankBadge, RankProgress } from "../rank-ui";
+import { ArenaAtmosphere } from "../experience/effects";
 
 export default function Home() {
-  const { demoElo } = useExperience()
-  const topPlayers = getDemoRankings(demoElo).slice(0, 4)
+  const { language } = useLanguage();
+  const locale = intlLocale(language);
   const {
     go,
     username,
     signedIn,
+    currentUser,
+    playerStats,
+    leaderboard,
+    myMatches,
+    communitySummary,
     profileTone,
     openModal,
     roomList,
     viewRecord,
-  } = useApp()
+  } = useApp();
+  const topPlayers = leaderboard.slice(0, 4);
+  const today = new Intl.DateTimeFormat(locale, {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  }).format(new Date());
+  const weeklyChange = myMatches
+    .filter((match) => {
+      const age = Date.now() - new Date(match.finished_at).getTime();
+      return age >= 0 && age <= 7 * 24 * 60 * 60 * 1000;
+    })
+    .reduce((sum, match) => sum + (currentUser ? eloChangeForUser(match, currentUser.id) : 0), 0);
+  const rating = playerStats?.elo ?? currentUser?.elo;
   return (
     <div className="home-page page-stack">
       <ArenaAtmosphere />
@@ -59,7 +83,7 @@ export default function Home() {
         </div>
         <div className="today-label">
           <Calendar size={15} />
-          Chủ nhật, 24 tháng 5
+          {today}
         </div>
       </div>
       <div className="dashboard-grid">
@@ -77,33 +101,33 @@ export default function Home() {
               </Heading>
               <div className="hero-description">
                 Tìm một đối thủ xứng tầm, hay đơn giản
-                <br className="desktop-break" /> là tận hưởng một ván cờ thật
-                hay.
+                <br className="desktop-break" /> là tận hưởng một ván cờ thật hay.
               </div>
               <div className="hero-actions">
-                <Button
-                  iconEnd={<ArrowRight size={16} />}
-                  onClick={() => go("rooms")}
-                >
+                <Button iconEnd={<ArrowRight size={16} />} onClick={() => go("rooms")}>
                   Chơi ngay
                 </Button>
-                <Button
-                  variant="neutral"
-                  iconStart={<Bot size={17} />}
-                  onClick={() => go("ai")}
-                >
+                <Button variant="neutral" iconStart={<Bot size={17} />} onClick={() => go("ai")}>
                   Chơi với máy
                 </Button>
               </div>
-              <DemoMatchmakingNotice />
               <div className="hero-community">
                 <div className="mini-avatar-stack">
-                  <UserAvatar initials="NL" tone="sage" size="small" elo={2486} />
-                  <UserAvatar initials="KV" tone="sand" size="small" elo={2358} />
-                  <UserAvatar initials="TP" tone="blue" size="small" elo={2082} />
+                  {topPlayers.slice(0, 3).map((player) => (
+                    <UserAvatar
+                      key={player.user_id}
+                      initials={playerInitials(player.display_name)}
+                      tone="sage"
+                      size="small"
+                      elo={player.elo}
+                      current={player.user_id === currentUser?.id}
+                    />
+                  ))}
                 </div>
                 <span>
-                  Cùng <strong>1.248</strong> kỳ hữu · số liệu demo
+                  {communitySummary
+                    ? `${communitySummary.registered_players} kỳ thủ · ${communitySummary.open_public_rooms} phòng đang mở`
+                    : "Số liệu cộng đồng đang tải từ máy chủ"}
                 </span>
               </div>
             </div>
@@ -127,11 +151,7 @@ export default function Home() {
             </div>
           </section>
           <div className="quick-action-grid">
-            <Button
-              variant="neutral"
-              className="quick-action"
-              onClick={() => openModal("create")}
-            >
+            <Button variant="neutral" className="quick-action" onClick={() => openModal("create")}>
               <span className="quick-icon tone-rose">
                 <Plus size={22} strokeWidth={1.7} />
               </span>
@@ -141,25 +161,17 @@ export default function Home() {
               </span>
               <ChevronRight size={17} className="muted" />
             </Button>
-            <Button
-              variant="neutral"
-              className="quick-action"
-              onClick={() => go("rooms")}
-            >
+            <Button variant="neutral" className="quick-action" onClick={() => go("rooms")}>
               <span className="quick-icon tone-sage">
                 <Swords size={22} strokeWidth={1.7} />
               </span>
               <span className="quick-copy">
                 <span className="quick-title">Tìm đối thủ</span>
-                <span className="small muted">Mở Sảnh đấu · bản demo</span>
+                <span className="small muted">Phòng công khai đang hoạt động</span>
               </span>
               <ChevronRight size={17} className="muted" />
             </Button>
-            <Button
-              variant="neutral"
-              className="quick-action"
-              onClick={() => openModal("rules")}
-            >
+            <Button variant="neutral" className="quick-action" onClick={() => openModal("rules")}>
               <span className="quick-icon tone-sand">
                 <Sprout size={22} strokeWidth={1.7} />
               </span>
@@ -173,7 +185,7 @@ export default function Home() {
           <section className="surface lobby-preview">
             <SectionTitle
               title="Sảnh đấu đang mở"
-              subtitle="Các bàn cờ mẫu để trải nghiệm."
+              subtitle="Phòng công khai đang chờ đối thủ."
               action="Xem tất cả"
               onAction={() => go("rooms")}
             />
@@ -183,10 +195,10 @@ export default function Home() {
               ))}
             </div>
             <div className="lobby-preview-footer">
-              <OnlineStatus>{roomList.length} phòng mẫu</OnlineStatus>
+              <OnlineStatus>{roomList.length} phòng đang chờ</OnlineStatus>
               <span className="small muted">
                 <span className="live-pulse" />
-                Dữ liệu mô phỏng
+                WebSocket trực tiếp
               </span>
             </div>
           </section>
@@ -196,7 +208,7 @@ export default function Home() {
               action="Xem lịch sử"
               onAction={() => go("history")}
             />
-            {signedIn ? (
+            {signedIn && currentUser && myMatches.length ? (
               <div className="table-wrap">
                 <table className="data-table recent-table">
                   <thead>
@@ -209,57 +221,64 @@ export default function Home() {
                     </tr>
                   </thead>
                   <tbody>
-                    {gameHistory.slice(0, 3).map((game) => (
-                      <tr key={game.id}>
-                        <td>
-                          <div className="inline">
-                            <UserAvatar
-                              initials={game.initials}
-                              tone={game.tone}
-                              size="medium"
-                              elo={game.elo}
-                            />
-                            <div>
-                              <div className="player-name">{game.opponent}</div>
-                              <div className="small muted">
-                                {game.elo.toLocaleString("vi-VN")} Elo
+                    {myMatches.slice(0, 3).map((match) => {
+                      const opponent = opponentNameForUser(match, currentUser.id);
+                      const result = matchResultForUser(match, currentUser.id);
+                      const change = eloChangeForUser(match, currentUser.id);
+                      return (
+                        <tr key={match.match_key}>
+                          <td>
+                            <div className="inline">
+                              <UserAvatar initials={playerInitials(opponent)} size="medium" />
+                              <div>
+                                <div className="player-name">{opponent}</div>
+                                <div className="small muted">{match.room_name}</div>
                               </div>
                             </div>
-                          </div>
-                        </td>
-                        <td>
-                          <span className={`result-tag ${game.result}`}>
-                            {resultLabels[game.result]}
-                          </span>
-                        </td>
-                        <td>
-                          <span
-                            className={`elo-change ${
-                              game.change > 0 ? "positive" : "negative"
-                            }`}
-                          >
-                            {game.change > 0 ? "+" : ""}
-                            {game.change} <span className="small">Elo</span>
-                          </span>
-                        </td>
-                        <td className="muted small">
-                          {game.date}, {game.time}
-                        </td>
-                        <td>
-                          <Button
-                            variant="subtle"
-                            size="small"
-                            onClick={() => viewRecord(game)}
-                            aria-label={`Xem lại ván với ${game.opponent}`}
-                            className="table-arrow"
-                          >
-                            <ArrowUpRight size={17} />
-                          </Button>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td>
+                            <span className={`result-tag ${result}`}>{resultLabels[result]}</span>
+                          </td>
+                          <td>
+                            <span
+                              className={`elo-change ${change > 0 ? "positive" : change < 0 ? "negative" : ""}`}
+                            >
+                              {change > 0 ? "+" : ""}
+                              {change} <span className="small">Elo</span>
+                            </span>
+                          </td>
+                          <td className="muted small">
+                            {new Date(match.finished_at).toLocaleString(locale)}
+                          </td>
+                          <td>
+                            <Button
+                              variant="subtle"
+                              size="small"
+                              onClick={() => viewRecord(match)}
+                              aria-label={`Xem lại ván với ${opponent}`}
+                              className="table-arrow"
+                            >
+                              <ArrowUpRight size={17} />
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
+              </div>
+            ) : signedIn ? (
+              <div className="guest-history">
+                <Clock size={24} />
+                <div>
+                  <Heading level={3}>Chưa có ván đấu được lưu</Heading>
+                  <div className="muted small">
+                    Kết quả trận trực tuyến giữa hai tài khoản sẽ xuất hiện tại đây.
+                  </div>
+                </div>
+                <Button variant="neutral" onClick={() => go("rooms")}>
+                  Tìm đối thủ
+                </Button>
               </div>
             ) : (
               <div className="guest-history">
@@ -291,12 +310,14 @@ export default function Home() {
                 current={signedIn}
               />
               <div>
-                <Heading level={3}>
-                  {signedIn ? username : "Kỳ hữu mới"}
-                </Heading>
+                <Heading level={3}>{signedIn ? username : "Kỳ hữu mới"}</Heading>
                 <div className="profile-level">
                   <span className="level-dot" />
-                  {signedIn ? <RankBadge elo={demoElo} compact /> : "Sẵn sàng khai cuộc"}
+                  {signedIn && rating != null ? (
+                    <RankBadge elo={rating} compact />
+                  ) : (
+                    "Sẵn sàng khai cuộc"
+                  )}
                 </div>
               </div>
               <Button
@@ -312,24 +333,37 @@ export default function Home() {
             <div className="elo-summary">
               <div>
                 <span className="elo-large">
-                  {(signedIn ? demoElo : 1000).toLocaleString("vi-VN")}
+                  {signedIn && rating != null ? rating.toLocaleString(locale) : "—"}
                 </span>
                 <span className="elo-label">Elo</span>
               </div>
               <span className="trend-label">
                 <TrendingUp size={14} />
-                +48 <span>tuần này</span>
+                {weeklyChange > 0 ? "+" : ""}
+                {weeklyChange} <span>tuần này</span>
               </span>
             </div>
-            <RankProgress elo={signedIn ? demoElo : 1000} />
-            <Button variant="subtle" size="small" className="rank-roadmap-link" iconEnd={<ArrowRight size={13} />} onClick={() => openModal("ranks")}>Lộ trình 13 cảnh giới</Button>
+            {signedIn && rating != null ? (
+              <RankProgress elo={rating} />
+            ) : (
+              <div className="small muted">Đăng nhập để xem cảnh giới và điểm Elo.</div>
+            )}
+            <Button
+              variant="subtle"
+              size="small"
+              className="rank-roadmap-link"
+              iconEnd={<ArrowRight size={13} />}
+              onClick={() => openModal("ranks")}
+            >
+              Lộ trình 13 cảnh giới
+            </Button>
             <div className="summary-stats">
               <div>
                 <span className="stat-icon tone-blue">
                   <Flag size={17} />
                 </span>
                 <div className="summary-stat-value">
-                  {signedIn ? "48" : "0"}
+                  {signedIn ? (playerStats?.games_played ?? 0) : "0"}
                 </div>
                 <span className="small muted">Trận đã chơi</span>
               </div>
@@ -338,7 +372,7 @@ export default function Home() {
                   <Trophy size={17} />
                 </span>
                 <div className="summary-stat-value">
-                  {signedIn ? "65" : "0"}
+                  {signedIn ? (playerStats?.win_rate ?? 0).toFixed(0) : "0"}
                   <span>%</span>
                 </div>
                 <span className="small muted">Tỷ lệ thắng</span>
@@ -359,39 +393,42 @@ export default function Home() {
             <div className="rank-list">
               {topPlayers.map((player, i) => (
                 <Button
-                  key={player.username}
+                  key={player.user_id}
                   variant="subtle"
                   className="rank-row"
                   onClick={() => go("leaderboard")}
                 >
                   <span className={`rank-position position-${i}`}>
-                    {i === 0 ? (
-                      <Crown size={18} />
-                    ) : (
-                      String(i + 1).padStart(2, "0")
-                    )}
+                    {i === 0 ? <Crown size={18} /> : String(i + 1).padStart(2, "0")}
                   </span>
                   <UserAvatar
-                    initials={player.initials}
-                    tone={player.tone}
+                    initials={playerInitials(player.display_name)}
+                    tone="sage"
                     size="medium"
                     elo={player.elo}
-                    current={player.username === "MinhAnh" && signedIn}
+                    current={player.user_id === currentUser?.id}
                   />
                   <span className="rank-player">
-                    <span>{player.username === "MinhAnh" && signedIn ? username : player.username}</span>
+                    <span>{player.display_name}</span>
                     <RankBadge elo={player.elo} compact />
                   </span>
                   <span className="rank-elo">
-                    {player.elo.toLocaleString("vi-VN")}
+                    {player.elo.toLocaleString(locale)}
                     <span>Elo</span>
                   </span>
                 </Button>
               ))}
+              {!topPlayers.length && (
+                <div className="guest-history muted small">
+                  Chưa có người chơi đủ dữ liệu để xếp hạng.
+                </div>
+              )}
             </div>
             <div className="ranking-update">
               <Clock size={12} />
-              Dữ liệu demo · không đồng bộ máy chủ
+              {communitySummary
+                ? `${communitySummary.registered_players} tài khoản đã đăng ký`
+                : "Đang chờ dữ liệu máy chủ"}
             </div>
           </section>
           <section className="wisdom-card">
@@ -424,17 +461,15 @@ export default function Home() {
             </span>
             <div>
               <span>Văn minh trên từng nước cờ</span>
-              <div className="muted small">
-                Tôn trọng đối thủ. Tận hưởng cuộc chơi.
-              </div>
+              <div className="muted small">Tôn trọng đối thủ. Tận hưởng cuộc chơi.</div>
             </div>
           </div>
         </aside>
       </div>
       <footer className="page-footer">
         <span>© 2026 Kỳ Tiên Hội. Kết nối đam mê cờ tướng.</span>
-        <span>Bản mẫu tương tác · Dữ liệu minh họa</span>
+        <span>Kết quả, Elo và thứ hạng lấy từ các ván đã lưu.</span>
       </footer>
     </div>
-  )
+  );
 }

@@ -21,21 +21,21 @@ Các hướng dẫn dưới đây mô tả cách đi qua từng màn hình trong
 
 ## Màn hình
 
-| Màn hình | Đường dẫn |
-| --- | --- |
-| Sảnh chính | `#sanh-chinh` |
-| Thiết lập chơi với máy | `#choi-voi-may` |
-| Sảnh đấu, tìm kiếm và lọc phòng | `#sanh-dau` |
-| Phòng chờ | `#phong-cho` |
-| Ván đấu với máy hoặc kỳ hữu | `#van-co` |
-| Lịch sử ván đấu | `#lich-su` |
-| Xem lại từng nước cờ | `#xem-lai` |
-| Bảng Phong Thần | `#bang-xep-hang` |
-| Hồ sơ cá nhân | `#ho-so` |
-| Đăng nhập / Đăng ký | `#dang-nhap` / `#dang-ky` |
-| Quên mật khẩu | `#quen-mat-khau` |
-| Xác minh OTP | `#xac-minh-email` |
-| Đặt mật khẩu mới | `#mat-khau-moi` |
+| Màn hình                        | Đường dẫn                 |
+| ------------------------------- | ------------------------- |
+| Sảnh chính                      | `#sanh-chinh`             |
+| Thiết lập chơi với máy          | `#choi-voi-may`           |
+| Sảnh đấu, tìm kiếm và lọc phòng | `#sanh-dau`               |
+| Phòng chờ                       | `#phong-cho`              |
+| Ván đấu với máy hoặc kỳ hữu     | `#van-co`                 |
+| Lịch sử ván đấu                 | `#lich-su`                |
+| Xem lại từng nước cờ            | `#xem-lai`                |
+| Bảng Phong Thần                 | `#bang-xep-hang`          |
+| Hồ sơ cá nhân                   | `#ho-so`                  |
+| Đăng nhập / Đăng ký             | `#dang-nhap` / `#dang-ky` |
+| Quên mật khẩu                   | `#quen-mat-khau`          |
+| Xác minh OTP                    | `#xac-minh-email`         |
+| Đặt mật khẩu mới                | `#mat-khau-moi`           |
 
 Các tác vụ tạo phòng, nhập mật khẩu phòng, chia sẻ, hướng dẫn, cài đặt và chỉnh sửa hồ sơ sử dụng modal thống nhất.
 

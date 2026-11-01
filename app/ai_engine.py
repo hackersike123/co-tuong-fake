@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import random
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
 
 from .xiangqi import (
+    Board,
     GameStatus,
     Move,
     Piece,
@@ -17,6 +19,7 @@ from .xiangqi import (
     XiangqiState,
     apply_move,
     game_status,
+    game_winner,
     is_in_check,
     legal_moves,
 )
@@ -28,12 +31,14 @@ _PIECE_VALUES = {
     PieceKind.GENERAL: 10_000,
     PieceKind.ROOK: 900,
     PieceKind.CANNON: 450,
-    PieceKind.HORSE: 430,
+    PieceKind.HORSE: 400,
     PieceKind.ADVISOR: 200,
     PieceKind.ELEPHANT: 200,
     PieceKind.PAWN: 100,
 }
 _MAX_CACHED_POSITIONS = 20_000
+_HARD_NODE_LIMIT = 1_000_000
+_HARD_DEPTH_FIVE_BUDGET_SECONDS = 1.5
 _MOVE_CACHE: OrderedDict[str, tuple[Move, ...]] = OrderedDict()
 _MOVE_CACHE_LOCK = Lock()
 
@@ -61,18 +66,18 @@ class DifficultySettings:
 DIFFICULTY_SETTINGS = {
     Difficulty.EASY: DifficultySettings(
         min_depth=1,
-        max_depth=2,
+        max_depth=1,
         default_depth=1,
         random_move_probability=0.30,
     ),
     Difficulty.MEDIUM: DifficultySettings(
         min_depth=3,
-        max_depth=4,
+        max_depth=3,
         default_depth=3,
         random_move_probability=0.0,
     ),
     Difficulty.HARD: DifficultySettings(
-        min_depth=5,
+        min_depth=4,
         max_depth=5,
         default_depth=5,
         random_move_probability=0.0,
@@ -101,6 +106,8 @@ class _TranspositionEntry:
 class _SearchContext:
     table: dict[str, _TranspositionEntry]
     killers: dict[int, tuple[Move, ...]]
+    node_limit: int | None = None
+    deadline: float | None = None
     nodes: int = 0
     cutoffs: int = 0
     repetition_hits: int = 0
@@ -186,21 +193,20 @@ def _evaluate(state: XiangqiState, difficulty: Difficulty) -> int:
                     if piece.side is Side.RED
                     else row_index >= 5
                 )
-                if crossed_river and difficulty is not Difficulty.EASY:
-                    value += 20
+                if crossed_river:
+                    value += 12 if difficulty is Difficulty.EASY else 20
 
-            if difficulty in {Difficulty.MEDIUM, Difficulty.HARD}:
-                centrality = 4 - abs(column_index - 4)
-                activity_weight = {
-                    PieceKind.ROOK: 4,
-                    PieceKind.CANNON: 5,
-                    PieceKind.HORSE: 5,
-                    PieceKind.PAWN: 2,
-                    PieceKind.ADVISOR: 1,
-                    PieceKind.ELEPHANT: 1,
-                    PieceKind.GENERAL: 0,
-                }[piece.kind]
-                value += centrality * activity_weight
+            centrality = 4 - abs(column_index - 4)
+            activity_weight = {
+                PieceKind.ROOK: 4,
+                PieceKind.CANNON: 5,
+                PieceKind.HORSE: 5,
+                PieceKind.PAWN: 2,
+                PieceKind.ADVISOR: 1,
+                PieceKind.ELEPHANT: 1,
+                PieceKind.GENERAL: 0,
+            }[piece.kind]
+            value += centrality * activity_weight
 
             if difficulty is Difficulty.HARD:
                 if (
@@ -223,6 +229,34 @@ def _evaluate(state: XiangqiState, difficulty: Difficulty) -> int:
     return red_score
 
 
+def evaluate_board(
+    board: XiangqiState | Board,
+    ai_side: Side | str,
+) -> int:
+    """Evaluate a Xiangqi position from the requested side's perspective.
+
+    ``board`` normally is the rules engine's immutable ``XiangqiState``. A raw
+    board tuple is also accepted for callers that already use that structure;
+    in that case the active side defaults to Red because a board alone has no
+    turn information.
+    """
+    state = board if isinstance(board, XiangqiState) else XiangqiState(board=board)
+    side = Side(ai_side)
+    status = game_status(state)
+    if status is GameStatus.DRAW:
+        return 0
+    if status not in {GameStatus.ACTIVE, GameStatus.CHECK}:
+        winner = state.turn.opponent if status in {GameStatus.CHECKMATE, GameStatus.STALEMATE} else None
+        if winner is None:
+            winner = game_winner(state)
+        if winner is None:
+            return 0
+        return MATE_SCORE if winner is side else -MATE_SCORE
+
+    red_score = _evaluate(state, Difficulty.MEDIUM)
+    return red_score if side is Side.RED else -red_score
+
+
 def _move_order_score(
     state: XiangqiState,
     move: Move,
@@ -240,21 +274,23 @@ def _move_order_score(
         return -_INFINITY
 
     if target is not None:
-        return 1_000_000 + 16 * _PIECE_VALUES[target.kind] - _PIECE_VALUES[attacker.kind]
-
-    if move in killer_moves:
+        score = 1_000_000 + 16 * _PIECE_VALUES[target.kind] - _PIECE_VALUES[attacker.kind]
+    elif move in killer_moves:
         return 100_000 - killer_moves.index(move) * 100
+    else:
+        destination_row, destination_column = move.destination
+        center_score = 4 - abs(destination_column - 4)
+        score = center_score * (2 if difficulty is Difficulty.HARD else 1)
+        if attacker.kind is PieceKind.PAWN:
+            advance = (
+                move.origin[0] - destination_row
+                if attacker.side is Side.RED
+                else destination_row - move.origin[0]
+            )
+            score += advance * 2
 
-    destination_row, destination_column = move.destination
-    center_score = 4 - abs(destination_column - 4)
-    score = center_score * (2 if difficulty is Difficulty.HARD else 1)
-    if attacker.kind is PieceKind.PAWN:
-        advance = (
-            move.origin[0] - destination_row
-            if attacker.side is Side.RED
-            else destination_row - move.origin[0]
-        )
-        score += advance * 2
+    if difficulty is Difficulty.HARD and is_in_check(_search_child(state, move)):
+        score += 500_000
     return score
 
 
@@ -314,61 +350,71 @@ def choose_move(
         return None
 
     random_source = rng or random.SystemRandom()
-    if (
-        settings.random_move_probability > 0
-        and random_source.random() < settings.random_move_probability
-    ):
-        return SearchResult(
-            move=random_source.choice(root_moves),
-            score=0,
-            depth=selected_depth,
-            nodes=0,
-            cutoffs=0,
-        )
-
-    context = _SearchContext(table={}, killers={})
+    context = _SearchContext(
+        table={},
+        killers={},
+    )
     path = {state.position_key: 1}
     is_maximizing = state.turn is Side.RED
     best_move = root_moves[0]
     best_score = 0
+    completed_depth = 0
 
     for current_depth in range(1, selected_depth + 1):
+        # Hard always completes at least depth four. The node budget applies
+        # only to the optional fifth iteration, which can fall back to depth 4.
+        context.node_limit = (
+            _HARD_NODE_LIMIT
+            if selected_difficulty is Difficulty.HARD
+            and current_depth > settings.min_depth
+            else None
+        )
+        context.deadline = (
+            time.monotonic() + _HARD_DEPTH_FIVE_BUDGET_SECONDS
+            if selected_difficulty is Difficulty.HARD
+            and current_depth > settings.min_depth
+            else None
+        )
         iteration_score = -_INFINITY if is_maximizing else _INFINITY
         iteration_move = best_move
         alpha = -_INFINITY
         beta = _INFINITY
 
-        for move in _ordered_moves(
-            state,
-            root_moves,
-            preferred_move=best_move,
-            killer_moves=(),
-            difficulty=selected_difficulty,
-        ):
-            child = _search_child(state, move)
-            score = _alpha_beta(
-                child,
-                current_depth - 1,
-                alpha,
-                beta,
-                ply=1,
-                path=path,
-                context=context,
+        try:
+            for move in _ordered_moves(
+                state,
+                root_moves,
+                preferred_move=best_move,
+                killer_moves=(),
                 difficulty=selected_difficulty,
-            )
-            if (is_maximizing and score > iteration_score) or (
-                not is_maximizing and score < iteration_score
             ):
-                iteration_score = score
-                iteration_move = move
+                child = _search_child(state, move)
+                score = _alpha_beta(
+                    child,
+                    current_depth - 1,
+                    alpha,
+                    beta,
+                    ply=1,
+                    path=path,
+                    context=context,
+                    difficulty=selected_difficulty,
+                )
+                if (is_maximizing and score > iteration_score) or (
+                    not is_maximizing and score < iteration_score
+                ):
+                    iteration_score = score
+                    iteration_move = move
 
-            if is_maximizing:
-                alpha = max(alpha, iteration_score)
-            else:
-                beta = min(beta, iteration_score)
+                if is_maximizing:
+                    alpha = max(alpha, iteration_score)
+                else:
+                    beta = min(beta, iteration_score)
+        except _SearchBudgetExceeded:
+            break
 
         best_score = iteration_score
         best_move = iteration_move
+        completed_depth = current_depth
         context.table[state.position_key] = _TranspositionEntry(
             depth=current_depth,
             score=best_score,
@@ -376,13 +422,74 @@ def choose_move(
             best_move=best_move,
         )
 
+    if (
+        settings.random_move_probability > 0
+        and random_source.random() < settings.random_move_probability
+    ):
+        best_move = random_source.choice(root_moves)
+        best_score = 0
+
     return SearchResult(
         move=best_move,
         score=best_score if is_maximizing else -best_score,
-        depth=selected_depth,
+        depth=completed_depth,
         nodes=context.nodes,
         cutoffs=context.cutoffs,
     )
+
+
+class _SearchBudgetExceeded(Exception):
+    """Abort an incomplete iterative-deepening layer at the node budget."""
+
+
+def minimax(
+    state: XiangqiState,
+    depth: int,
+    alpha: int = -_INFINITY,
+    beta: int = _INFINITY,
+    ai_side: Side | str = Side.RED,
+    *,
+    difficulty: Difficulty | str = Difficulty.MEDIUM,
+) -> int:
+    """Return an alpha-beta minimax score from ``ai_side``'s perspective."""
+    if depth < 0:
+        raise ValueError("Search depth cannot be negative")
+    side = Side(ai_side)
+    selected_difficulty = Difficulty(difficulty)
+    context = _SearchContext(table={}, killers={})
+    path = {state.position_key: 1}
+    if side is Side.RED:
+        return _alpha_beta(
+            state,
+            depth,
+            alpha,
+            beta,
+            ply=0,
+            path=path,
+            context=context,
+            difficulty=selected_difficulty,
+        )
+    return -_alpha_beta(
+        state,
+        depth,
+        -beta,
+        -alpha,
+        ply=0,
+        path=path,
+        context=context,
+        difficulty=selected_difficulty,
+    )
+
+
+def get_best_move(
+    state: XiangqiState,
+    difficulty: Difficulty | str = Difficulty.MEDIUM,
+    *,
+    depth: int | None = None,
+    rng: random.Random | random.SystemRandom | None = None,
+) -> SearchResult | None:
+    """Public PvE entry point; preserve ``choose_move`` for existing callers."""
+    return choose_move(state, difficulty, depth=depth, rng=rng)
 
 
 def _alpha_beta(
@@ -397,6 +504,14 @@ def _alpha_beta(
     difficulty: Difficulty,
 ) -> int:
     context.nodes += 1
+    if context.node_limit is not None and context.nodes > context.node_limit:
+        raise _SearchBudgetExceeded
+    if (
+        context.deadline is not None
+        and context.nodes % 32 == 0
+        and time.monotonic() >= context.deadline
+    ):
+        raise _SearchBudgetExceeded
     position_key = state.position_key
     path_occurrences = path.get(position_key, 0)
     if path_occurrences >= 2:
