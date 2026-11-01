@@ -39,8 +39,8 @@ test("clamps expired clocks and ignores negative elapsed time", () => {
   });
 });
 
-test("charges the previous side before anchoring the next turn", () => {
-  const next = advanceGameClock(start("red"), "black", 6_000);
+test("charges the previous side and resets the incoming side to the per-turn limit", () => {
+  const next = advanceGameClock({ ...start("red"), blackTimeMs: 12_000 }, "black", 6_000, 60_000);
   assert.deepEqual(next, {
     redTimeMs: 55_000,
     blackTimeMs: 60_000,
@@ -51,5 +51,13 @@ test("charges the previous side before anchoring the next turn", () => {
   assert.deepEqual(readGameClock(next, 7_000), {
     redTimeMs: 55_000,
     blackTimeMs: 59_000,
+  });
+  const redTurn = advanceGameClock(next, "red", 11_000, 60_000);
+  assert.deepEqual(redTurn, {
+    redTimeMs: 60_000,
+    blackTimeMs: 55_000,
+    activeSide: "red",
+    updatedAtMs: 11_000,
+    paused: false,
   });
 });

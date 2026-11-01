@@ -1336,7 +1336,12 @@ export function Game() {
   }
   function anchorLocalClockTurn(activeSide: Side) {
     const updatedAtMs = performance.now();
-    clockSnapshotRef.current = advanceGameClock(clockSnapshotRef.current, activeSide, updatedAtMs);
+    clockSnapshotRef.current = advanceGameClock(
+      clockSnapshotRef.current,
+      activeSide,
+      updatedAtMs,
+      seconds * 1000,
+    );
     setClockNow(updatedAtMs);
   }
   function syncFen(nextFen: string) {

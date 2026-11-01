@@ -21,9 +21,12 @@ export function advanceGameClock(
   snapshot: GameClockSnapshot,
   activeSide: "red" | "black",
   updatedAtMs: number,
+  turnLimitMs: number,
 ): GameClockSnapshot {
+  const advanced = readGameClock(snapshot, updatedAtMs);
   return {
-    ...readGameClock(snapshot, updatedAtMs),
+    redTimeMs: activeSide === "red" ? turnLimitMs : advanced.redTimeMs,
+    blackTimeMs: activeSide === "black" ? turnLimitMs : advanced.blackTimeMs,
     activeSide,
     updatedAtMs,
     paused: snapshot.paused,
