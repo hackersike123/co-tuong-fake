@@ -602,6 +602,7 @@ const VI_TO_EN: Readonly<Record<string, string>> = {
   "Cần đăng nhập để tiếp tục.": "Authentication is required",
   "Chưa lưu được kết quả ván trước; hãy thử lại.":
     "Could not save the previous game result. Please try again.",
+  "Hết giờ.": "Time ran out.",
   "Mã xác minh mới đã được gửi qua email.": "A new verification code has been sent by email.",
   "Mã được gửi qua email và hết hạn sau 5 phút.":
     "The code was sent by email and expires in 5 minutes.",

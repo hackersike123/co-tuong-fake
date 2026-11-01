@@ -57,6 +57,7 @@ import {
   isCurrentIncomingCall,
   isOtherPlayerRole,
 } from "../room-interactions";
+import { advanceGameClock, readGameClock, type GameClockSnapshot } from "../game-clock";
 import {
   formatClock,
   initialPieces,
@@ -877,8 +878,15 @@ export function Game() {
   const [fen, setFen] = useState<string | null>(null);
   const [turn, setTurn] = useState<Side>("red");
   const seconds = 60;
-  const [redTimeMs, setRedTimeMs] = useState(activeRoom.seconds * 1000);
-  const [blackTimeMs, setBlackTimeMs] = useState(activeRoom.seconds * 1000);
+  const initialClockMs = activeRoom.seconds * 1000;
+  const [clockNow, setClockNow] = useState(() => performance.now());
+  const clockSnapshotRef = useRef<GameClockSnapshot>({
+    redTimeMs: initialClockMs,
+    blackTimeMs: initialClockMs,
+    activeSide: config.side,
+    updatedAtMs: performance.now(),
+    paused: true,
+  });
   const [serverPending, setServerPending] = useState(false);
   const roomSocket = useRef<WebSocket | null>(null);
   const [callStatus, setCallStatus] = useState<CallStatus>("idle");
@@ -931,6 +939,7 @@ export function Game() {
   }, [config.side]);
   const ai = config.mode === "ai";
   const spectator = !!config.spectator;
+  const displayClocks = readGameClock(clockSnapshotRef.current, clockNow);
   const opponentSide = config.side === "red" ? "black" : "red";
   const playerName = spectator
     ? config.side === "red"
@@ -985,6 +994,19 @@ export function Game() {
     setCheck(false);
     setSelected(null);
   };
+  useEffect(() => {
+    if (outcome || disconnected) return;
+    const timer = window.setInterval(() => setClockNow(performance.now()), 200);
+    return () => window.clearInterval(timer);
+  }, [outcome, disconnected]);
+  useEffect(() => {
+    const clock = clockSnapshotRef.current;
+    if (!ai || outcome || disconnected || clock.paused) return;
+    const activeTimeMs =
+      clock.activeSide === "red" ? displayClocks.redTimeMs : displayClocks.blackTimeMs;
+    if (activeTimeMs > 0) return;
+    finish(clock.activeSide === config.side ? "loss" : "win", "Hết giờ.");
+  }, [ai, clockNow, config.side, disconnected, outcome]);
   useEffect(() => {
     if (!outcome || config.mode !== "online" || spectator || !currentUser) return;
     setRating((previous) => {
@@ -1301,11 +1323,28 @@ export function Game() {
     },
     [],
   );
+  function anchorClock(redTimeMs: number, blackTimeMs: number, activeSide: Side, paused = false) {
+    const updatedAtMs = performance.now();
+    clockSnapshotRef.current = {
+      redTimeMs,
+      blackTimeMs,
+      activeSide,
+      updatedAtMs,
+      paused,
+    };
+    setClockNow(updatedAtMs);
+  }
+  function anchorLocalClockTurn(activeSide: Side) {
+    const updatedAtMs = performance.now();
+    clockSnapshotRef.current = advanceGameClock(clockSnapshotRef.current, activeSide, updatedAtMs);
+    setClockNow(updatedAtMs);
+  }
   function syncFen(nextFen: string) {
     const nextPieces = piecesFromFen(nextFen);
     setFen(nextFen);
     setPieces(nextPieces);
     const nextSide = nextFen.trim().split(/\s+/)[1] === "b" ? "black" : "red";
+    if (ai && !clockSnapshotRef.current.paused) anchorLocalClockTurn(nextSide);
     setTurn(nextSide);
     setSelected(null);
     setHint(null);
@@ -1329,8 +1368,14 @@ export function Game() {
         // Keep the visible move list if a legacy server sends malformed notation.
       }
     }
-    if (typeof game.red_time_ms === "number") setRedTimeMs(game.red_time_ms);
-    if (typeof game.black_time_ms === "number") setBlackTimeMs(game.black_time_ms);
+    if (typeof game.red_time_ms === "number" && typeof game.black_time_ms === "number") {
+      anchorClock(
+        game.red_time_ms,
+        game.black_time_ms,
+        game.side_to_move === "w" ? "red" : "black",
+        game.paused === true || game.status === "finished",
+      );
+    }
     setTurn(game.side_to_move === "w" ? "red" : "black");
     if (typeof game.paused === "boolean") setDisconnected(game.paused);
     if (game.status === "finished") {
@@ -1379,6 +1424,7 @@ export function Game() {
       },
       120_000,
     );
+    if (ended.current) return;
     appendMove(
       "black" === config.side ? "red" : "black",
       response.move.from[1],
@@ -1395,6 +1441,7 @@ export function Game() {
     setServerPending(true);
     setOutcome(null);
     ended.current = false;
+    anchorClock(seconds * 1000, seconds * 1000, config.side, true);
     void request<{
       fen: string;
       side_to_move: "w" | "b";
@@ -1406,6 +1453,7 @@ export function Game() {
       .then(async (game) => {
         if (cancelled) return;
         setMoves([]);
+        anchorClock(seconds * 1000, seconds * 1000, game.side_to_move === "w" ? "red" : "black");
         syncFen(game.fen);
         if (game.side_to_move !== game.player_side) await requestAiMove(game.fen);
       })
@@ -1460,6 +1508,7 @@ export function Game() {
             red_time_ms?: number;
             black_time_ms?: number;
             side_to_move?: "w" | "b";
+            paused?: boolean;
             reconnect_seconds?: number;
             reason?: string;
             role?: string;
@@ -1489,9 +1538,19 @@ export function Game() {
             }
             syncGame(event.game);
           } else if (event.type === "timer_tick") {
-            if (typeof event.red_time_ms === "number") setRedTimeMs(event.red_time_ms);
-            if (typeof event.black_time_ms === "number") setBlackTimeMs(event.black_time_ms);
-            if (event.side_to_move) setTurn(event.side_to_move === "w" ? "red" : "black");
+            if (
+              typeof event.red_time_ms === "number" &&
+              typeof event.black_time_ms === "number" &&
+              event.side_to_move
+            ) {
+              anchorClock(
+                event.red_time_ms,
+                event.black_time_ms,
+                event.side_to_move === "w" ? "red" : "black",
+                event.paused === true,
+              );
+              setTurn(event.side_to_move === "w" ? "red" : "black");
+            }
           } else if (
             ["game.timeout", "game.forfeit", "game_over"].includes(event.type || "") &&
             event.game
@@ -1572,6 +1631,7 @@ export function Game() {
         from: [piece.y, piece.x],
         to: [y, x],
       });
+      if (ended.current) return;
       appendMove(piece.side, piece.x, piece.y, x, y);
       syncFen(response.fen);
       playMove(piece.label, false);
@@ -1666,7 +1726,6 @@ export function Game() {
     remaining.set(key, count - 1);
     return false;
   });
-  const clock = formatClock(seconds);
   const last = moves[moves.length - 1];
   const title = ai
     ? `Luyện cờ cùng máy · ${difficultyOptions.find((d) => d.id === config.difficulty)?.name || "Trung bình"}`
@@ -1737,11 +1796,12 @@ export function Game() {
             elo={ai ? undefined : opponentElo}
             side={opponentSide}
             active={turn === opponentSide && !outcome}
-            time={
-              ai
-                ? clock
-                : formatClock(Math.ceil((opponentSide === "red" ? redTimeMs : blackTimeMs) / 1000))
-            }
+            time={formatClock(
+              Math.ceil(
+                (opponentSide === "red" ? displayClocks.redTimeMs : displayClocks.blackTimeMs) /
+                  1000,
+              ),
+            )}
             computer={ai}
             tone="blue"
             winner={outcome?.cause === "checkmate" && outcome.result === "loss"}
@@ -1793,11 +1853,12 @@ export function Game() {
             current={!spectator}
             side={config.side}
             active={turn === config.side && !outcome}
-            time={
-              ai
-                ? clock
-                : formatClock(Math.ceil((config.side === "red" ? redTimeMs : blackTimeMs) / 1000))
-            }
+            time={formatClock(
+              Math.ceil(
+                (config.side === "red" ? displayClocks.redTimeMs : displayClocks.blackTimeMs) /
+                  1000,
+              ),
+            )}
             tone="rose"
             winner={outcome?.cause === "checkmate" && outcome.result === "win"}
           />

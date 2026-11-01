@@ -40,6 +40,7 @@ assert.equal(
   translateText("Không xác nhận được việc đăng xuất. Hãy thử lại khi có kết nối.", "en"),
   "Could not confirm sign-out. Please try again when connected.",
 );
+assert.equal(translateText("Hết giờ.", "en"), "Time ran out.");
 assert.equal(
   translateText("Invalid email/username or password", "vi"),
   "Email, tên đăng nhập hoặc mật khẩu không đúng.",
